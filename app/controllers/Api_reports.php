@@ -41,6 +41,49 @@ class Api_reports extends Controller
         return get_request_input();
     }
 
+    private function hasReportCoordinates()
+    {
+        $columns = $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')
+            ->fetchAll(PDO::FETCH_COLUMN);
+
+        return in_array('latitude', $columns, true)
+            && in_array('longitude', $columns, true);
+    }
+
+    private function reportCoordinates($input)
+    {
+        $latitude = $input['latitude'] ?? null;
+        $longitude = $input['longitude'] ?? null;
+        $latitudeEmpty = $latitude === '' || $latitude === null;
+        $longitudeEmpty = $longitude === '' || $longitude === null;
+
+        if ($latitudeEmpty && $longitudeEmpty) {
+            return ['latitude' => null, 'longitude' => null];
+        }
+
+        if ($latitudeEmpty !== $longitudeEmpty) {
+            api_error('Both map coordinates are required.', 422);
+            return null;
+        }
+
+        if (!is_numeric($latitude) || !is_numeric($longitude)
+            || (float) $latitude < -90 || (float) $latitude > 90
+            || (float) $longitude < -180 || (float) $longitude > 180) {
+            api_error('Select a valid map location.', 422);
+            return null;
+        }
+
+        if (!$this->hasReportCoordinates()) {
+            api_error('Map locations are not enabled until the report-coordinate migration is applied.', 503);
+            return null;
+        }
+
+        return [
+            'latitude' => round((float) $latitude, 7),
+            'longitude' => round((float) $longitude, 7)
+        ];
+    }
+
     private function findReport($id)
     {
         return $this->db->table('hazard_reports')
@@ -57,6 +100,7 @@ class Api_reports extends Controller
                 'hazard_reports.category_id, hazard_reports.station_id, hazard_reports.title, ' .
                 'hazard_reports.description, hazard_reports.address_details, hazard_reports.status, ' .
                 'hazard_reports.submitted_at, hazard_reports.updated_at, ' .
+                ($this->hasReportCoordinates() ? 'hazard_reports.latitude, hazard_reports.longitude, ' : '') .
                 'hazard_categories.category_name, stations.station_name'
             )
             ->join('hazard_categories', 'hazard_categories.category_id = hazard_reports.category_id')
@@ -82,13 +126,18 @@ class Api_reports extends Controller
     public function index()
     {
         try {
-            $reports = $this->db->table('hazard_reports')
-            ->select(
-                'hazard_reports.report_id, hazard_reports.reference_number, ' .
+            $select = 'hazard_reports.report_id, hazard_reports.reference_number, ' .
                 'hazard_reports.category_id, hazard_reports.station_id, ' .
                 'hazard_reports.title, hazard_reports.description, ' .
                 'hazard_reports.address_details, hazard_reports.status, ' .
-                'hazard_reports.submitted_at, hazard_reports.updated_at, ' .
+                'hazard_reports.submitted_at, hazard_reports.updated_at, ';
+            if ($this->hasReportCoordinates()) {
+                $select .= 'hazard_reports.latitude, hazard_reports.longitude, ';
+            }
+
+            $reports = $this->db->table('hazard_reports')
+            ->select(
+                $select .
                 'hazard_categories.category_name, stations.station_name'
             )
             ->join(
@@ -237,6 +286,10 @@ class Api_reports extends Controller
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
         $address = trim((string) ($input['address_details'] ?? ''));
+        $coordinates = $this->reportCoordinates($input);
+        if ($coordinates === null) {
+            return;
+        }
 
         if ($categoryId < 1 || $title === '' || $description === '' || $address === '') {
             api_error('Category, title, description, and address are required.', 422);
@@ -277,7 +330,7 @@ class Api_reports extends Controller
 
             $referenceNumber = 'BA-' . date('YmdHis') . '-' . random_int(100, 999);
 
-            $inserted = $this->db->table('hazard_reports')->insert([
+            $reportData = [
                 'reference_number' => $referenceNumber,
                 'user_id' => $this->userId(),
                 'category_id' => $categoryId,
@@ -288,7 +341,12 @@ class Api_reports extends Controller
                 'status' => 'pending',
                 'submitted_at' => date('Y-m-d H:i:s'),
                 'updated_at' => date('Y-m-d H:i:s')
-            ]);
+            ];
+            if ($this->hasReportCoordinates()) {
+                $reportData = array_merge($reportData, $coordinates);
+            }
+
+            $inserted = $this->db->table('hazard_reports')->insert($reportData);
 
             if (!$inserted) {
                 api_error('Could not save the report.', 500);
@@ -347,6 +405,10 @@ class Api_reports extends Controller
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
         $address = trim((string) ($input['address_details'] ?? ''));
+        $coordinates = $this->reportCoordinates($input);
+        if ($coordinates === null) {
+            return;
+        }
 
         if ($categoryId < 1 || $title === '' || $description === '' || $address === '') {
             api_error('Category, title, description, and address are required.', 422);
@@ -392,17 +454,22 @@ class Api_reports extends Controller
                 }
             }
 
+            $reportData = [
+                'category_id' => $categoryId,
+                'station_id' => $stationId,
+                'title' => $title,
+                'description' => $description,
+                'address_details' => $address,
+                'updated_at' => date('Y-m-d H:i:s')
+            ];
+            if ($this->hasReportCoordinates()) {
+                $reportData = array_merge($reportData, $coordinates);
+            }
+
             $this->db->table('hazard_reports')
                 ->where('report_id', (int) $id)
                 ->where('user_id', $this->userId())
-                ->update([
-                    'category_id' => $categoryId,
-                    'station_id' => $stationId,
-                    'title' => $title,
-                    'description' => $description,
-                    'address_details' => $address,
-                    'updated_at' => date('Y-m-d H:i:s')
-                ]);
+                ->update($reportData);
 
             $uploadError = $this->saveEvidence((int) $id);
 

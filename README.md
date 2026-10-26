@@ -187,6 +187,16 @@ New resident registrations are assigned to the configured `resident` role, or `u
 
 The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications (plus any global notifications). Report responses omit reporter identity and exact address details.
 
+The public Leaflet hazard map uses `GET /api/map/reports` and only returns category, status, and coordinates for located reports. Incident addresses and reporter details are not included. Reports can store map points in the nullable `latitude` and `longitude` columns added by `app/migrations/003_add_hazard_report_coordinates.php`. Apply that LavaLust migration (or add those two columns with your database migration process) after importing the BayanAlert schema. For a local MySQL database, the equivalent schema update is:
+
+```sql
+ALTER TABLE hazard_reports
+    ADD COLUMN latitude DECIMAL(10,7) NULL,
+    ADD COLUMN longitude DECIMAL(10,7) NULL;
+```
+
+Migrations are disabled by default in `app/config/migration.php`. Until the columns exist, maps remain centered on Calapan without fabricated markers, and report submission continues to work using the address field.
+
 Create the admin role if it does not exist:
 
 ```sql
