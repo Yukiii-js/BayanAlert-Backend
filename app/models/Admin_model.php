@@ -118,6 +118,22 @@ class Admin_model extends Model
     ];
 
     private $schema_cache = [];
+    private $table_model_cache = [];
+
+    private function table_model_name($table)
+    {
+        return implode('', array_map('ucfirst', explode('_', $table))) . '_model';
+    }
+
+    private function get_table_model($table)
+    {
+        if (!isset($this->table_model_cache[$table])) {
+            $modelName = $this->table_model_name($table);
+            $this->table_model_cache[$table] = class_exists($modelName) ? new $modelName() : null;
+        }
+
+        return $this->table_model_cache[$table];
+    }
 
     public function get_tables()
     {
@@ -128,6 +144,14 @@ class Admin_model extends Model
     {
         if (!isset($this->tables[$table])) {
             throw new InvalidArgumentException('Unknown admin table.');
+        }
+
+        $model = $this->get_table_model($table);
+        if ($model && method_exists($model, 'info')) {
+            $info = $model->info();
+            if (is_array($info)) {
+                return array_merge($this->tables[$table], $info);
+            }
         }
 
         return $this->tables[$table];
@@ -217,6 +241,11 @@ class Admin_model extends Model
     public function get_table_count($table)
     {
         $this->get_table_info($table);
+
+        if (!$this->table_exists($table)) {
+            return 0;
+        }
+
         return (int) $this->db->table($table)->count();
     }
 
@@ -224,48 +253,122 @@ class Admin_model extends Model
     {
         $counts = [];
         $total = 0;
+        $availableTables = [];
+        $unavailableTables = [];
+
         foreach ($this->tables as $table => $info) {
-            $counts[$table] = $this->get_table_count($table);
+            $available = $this->table_exists($table);
+            $availableTables[$table] = $available;
+            $counts[$table] = $available
+                ? (int) $this->db->table($table)->count()
+                : 0;
             $total += $counts[$table];
+
+            if (!$available) {
+                $unavailableTables[] = $table;
+            }
         }
 
-        $recentReports = $this->db->table('hazard_reports')
-            ->select('report_id, reference_number, title, status, submitted_at')
-            ->order_by('submitted_at', 'DESC')
-            ->limit(6)
-            ->get_all();
+        $reportCount = $counts['hazard_reports'] ?? 0;
+        $pendingReports = 0;
+        $reportStatuses = [];
+        $recentReports = [];
+
+        if (!empty($availableTables['hazard_reports'])) {
+            $pendingReports = (int) $this->db->table('hazard_reports')
+                ->where('status', 'pending')
+                ->count();
+            $reportStatuses = $this->db->table('hazard_reports')
+                ->select('status, COUNT(*) AS total')
+                ->group_by('status')
+                ->get_all();
+            $recentReports = $this->db->table('hazard_reports')
+                ->select('report_id, reference_number, title, status, submitted_at')
+                ->order_by('submitted_at', 'DESC')
+                ->limit(6)
+                ->get_all();
+        }
+
+        $activeUsers = !empty($availableTables['users'])
+            ? (int) $this->db->table('users')->where('account_status', 'active')->count()
+            : 0;
 
         return [
             'counts' => $counts,
             'total_records' => $total,
-            'report_count' => $counts['hazard_reports'],
-            'pending_reports' => (int) $this->db->table('hazard_reports')
-                ->where('status', 'pending')
-                ->count(),
-            'active_users' => (int) $this->db->table('users')
-                ->where('account_status', 'active')
-                ->count(),
-            'recent_reports' => $recentReports
+            'report_count' => $reportCount,
+            'pending_reports' => $pendingReports,
+            'active_users' => $activeUsers,
+            'recent_reports' => $recentReports ?: [],
+            'report_statuses' => $reportStatuses ?: [],
+            'table_availability' => $availableTables,
+            'unavailable_tables' => $unavailableTables
         ];
+    }
+
+    private function table_exists($table)
+    {
+        $result = $this->db->raw(
+            'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
+            [$table]
+        );
+
+        return (int) $result->fetchColumn() > 0;
     }
 
     public function get_rows($table, $search = '', $page = 1, $pageSize = 25)
     {
+        $model = $this->get_table_model($table);
+        if ($model && method_exists($model, 'get_all_records')) {
+            return $model->get_all_records($search, $page, $pageSize);
+        }
+
         $info = $this->get_table_info($table);
         $columns = $this->get_column_names($table);
+        $displayColumns = $columns;
         $searchColumn = $this->get_search_column($table);
         $page = max(1, (int) $page);
         $offset = ($page - 1) * $pageSize;
 
         $countQuery = $this->db->table($table);
-        $rowsQuery = $this->db->table($table)->select(implode(', ', $columns));
+        $rowsQuery = $this->db->table($table);
+
+        if ($table === 'users') {
+            $displayColumns = array_map(function ($column) {
+                if ($column === 'role_id') {
+                    return 'role_name';
+                }
+                if ($column === 'barangay_id') {
+                    return 'barangay_name';
+                }
+                return $column;
+            }, $columns);
+
+            $selectColumns = array_map(function ($column) {
+                if ($column === 'role_id') {
+                    return 'roles.role_name AS role_name';
+                }
+                if ($column === 'barangay_id') {
+                    return 'barangays.barangay_name AS barangay_name';
+                }
+                return 'users.' . $column;
+            }, $columns);
+
+            $rowsQuery->left_join('roles', 'roles.role_id = users.role_id')
+                ->left_join('barangays', 'barangays.barangay_id = users.barangay_id');
+        } else {
+            $selectColumns = $columns;
+        }
+
+        $rowsQuery->select(implode(', ', $selectColumns));
         if ($search !== '' && $searchColumn !== null) {
             $countQuery->like($searchColumn, '%' . $search . '%');
             $rowsQuery->like($searchColumn, '%' . $search . '%');
         }
 
         return [
-            'rows' => $rowsQuery->order_by($info['primary_key'], 'DESC')
+            'columns' => $displayColumns,
+            'rows' => $rowsQuery->order_by($table . '.' . $info['primary_key'], 'DESC')
                 ->limit($pageSize, $offset)
                 ->get_all(),
             'total' => (int) $countQuery->count(),
@@ -277,6 +380,14 @@ class Admin_model extends Model
 
     public function get_record($table, $id)
     {
+        $model = $this->get_table_model($table);
+        if ($model && method_exists($model, 'find')) {
+            $record = $model->find($id);
+            if ($record !== null) {
+                return $record;
+            }
+        }
+
         $info = $this->get_table_info($table);
         return $this->db->table($table)
             ->where($info['primary_key'], $id)

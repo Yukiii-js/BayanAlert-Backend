@@ -22,8 +22,9 @@ class Api_admin extends Controller
             $data = $this->Admin_model->get_dashboard_data();
             $data['tables'] = $this->Admin_model->get_tables();
             api_response($data);
-        } catch (\Exception $e) {
-            api_error('Could not load dashboard data: ' . $e->getMessage(), 500);
+        } catch (\Throwable $e) {
+            error_log('Admin dashboard failed: ' . $e->getMessage());
+            api_error('Could not load dashboard data. Check the application and database logs.', 500);
         }
     }
 
@@ -58,7 +59,7 @@ class Api_admin extends Controller
             api_response([
                 'table'         => $table,
                 'table_info'    => $info,
-                'columns'       => $this->Admin_model->get_column_names($table),
+                'columns'       => $result['columns'],
                 'schema'        => $schema,
                 'rows'          => $result['rows'],
                 'total'         => $result['total'],

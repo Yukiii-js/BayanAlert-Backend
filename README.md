@@ -183,6 +183,10 @@ The panel provides searchable, paginated registers and CRUD forms for reports, u
 
 The hazard category CRUD is available in the panel under **Directory → Hazard categories**. Existing `/category` routes remain available for compatibility.
 
+New resident registrations are assigned to the configured `resident` role, or `user` role when that is the resident role name in the database, and saved with `account_status = 'pending'`. An administrator must activate the account before the resident can sign in. The Users register displays role and barangay names while retaining their IDs in the edit form.
+
+The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications (plus any global notifications). Report responses omit reporter identity and exact address details.
+
 Create the admin role if it does not exist:
 
 ```sql

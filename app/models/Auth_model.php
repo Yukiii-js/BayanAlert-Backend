@@ -14,4 +14,50 @@ class Auth_model extends Model {
                         ->or_where('users.username', $login)
                         ->get();
     }
+
+    public function get_user_by_email($email) {
+        return $this->db->table($this->table)
+                        ->where('email', $email)
+                        ->get();
+    }
+
+    public function get_user_by_username($username) {
+        return $this->db->table($this->table)
+                        ->where('username', $username)
+                        ->get();
+    }
+
+    public function get_resident_role() {
+        $role = $this->db->table('roles')
+                         ->where('role_name', 'resident')
+                         ->get();
+
+        if (!$role) {
+            $role = $this->db->table('roles')
+                             ->where('role_name', 'user')
+                             ->get();
+        }
+
+        return $role;
+    }
+
+    public function create_resident($data) {
+        return $this->db->table($this->table)->insert($data);
+    }
+
+    
+    public function get_active_barangay($barangay_id) {
+        return $this->db->table('barangays')
+                        ->where('barangay_id', $barangay_id)
+                        ->where('is_active', 1)
+                        ->get();
+    }
+
+    public function get_active_barangays() {
+        return $this->db->table('barangays')
+                        ->select('barangay_id, barangay_name')
+                        ->where('is_active', 1)
+                        ->get_all();
+    }
+
 }
