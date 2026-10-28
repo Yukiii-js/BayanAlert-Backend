@@ -427,8 +427,12 @@ class Admin_model extends Model
             $present = array_key_exists($formName, $input);
             $value = $present ? $input[$formName] : null;
 
+            if ($isUpdate && !$present) {
+                continue;
+            }
+
             if (!$field['password'] && !$field['nullable'] && $field['default'] === null
-                && (!$present || (is_string($value) && trim($value) === ''))) {
+                && (is_string($value) && trim($value) === '')) {
                 return ['data' => [], 'error' => $field['label'] . ' is required.'];
             }
 
