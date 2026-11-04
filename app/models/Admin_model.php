@@ -427,6 +427,10 @@ class Admin_model extends Model
             $present = array_key_exists($formName, $input);
             $value = $present ? $input[$formName] : null;
 
+            if ($isUpdate && !$present) {
+                continue;
+            }
+
             if (!$field['password'] && !$field['nullable'] && $field['default'] === null
                 && (!$present || (is_string($value) && trim($value) === ''))) {
                 return ['data' => [], 'error' => $field['label'] . ' is required.'];
@@ -502,6 +506,10 @@ class Admin_model extends Model
 
         if ($table === 'users' && !$isUpdate && empty($data['password_hash'])) {
             return ['data' => [], 'error' => 'Password is required.'];
+        }
+
+        if ($isUpdate && empty($data)) {
+            return ['data' => [], 'error' => 'Provide at least one field to update.'];
         }
 
         return ['data' => $data, 'error' => null];

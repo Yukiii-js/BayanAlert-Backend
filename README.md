@@ -185,9 +185,15 @@ The hazard category CRUD is available in the panel under **Directory → Hazard 
 
 New resident registrations are assigned to the configured `resident` role, or `user` role when that is the resident role name in the database, and saved with `account_status = 'pending'`. An administrator must activate the account before the resident can sign in. The Users register displays role and barangay names while retaining their IDs in the edit form.
 
-The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications (plus any global notifications). Report responses omit reporter identity and exact address details.
+The frontend keeps one authenticated account type per browser at a time. Sign out of an admin account before signing in as a resident, or sign out of a resident account before signing in as an admin. This session guard is synchronized across tabs in the same browser.
 
-The public Leaflet hazard map uses `GET /api/map/reports` and only returns category, status, and coordinates for located reports. Incident addresses and reporter details are not included. Reports can store map points in the nullable `latitude` and `longitude` columns added by `app/migrations/003_add_hazard_report_coordinates.php`. Apply that LavaLust migration (or add those two columns with your database migration process) after importing the BayanAlert schema. For a local MySQL database, the equivalent schema update is:
+The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications. Community reports include confirm/dispute totals and the signed-in resident's vote; `POST /api/reports/{id}/vote` accepts `{"vote":"confirm"}`, `{"vote":"dispute"}`, or `{"vote":null}` to remove a vote. Each resident has one changeable vote per report and cannot vote on their own report. Report responses omit reporter identity and exact address details.
+
+The admin portal's **Notifications** page shows new-report notifications and lets admins publish announcements. `POST /api/admin/announcements` sends a notification to every active account with the `resident` or `user` role. Residents receive notifications when an admin changes the status of one of their reports and can mark notifications as read. The notification APIs are `GET /api/notifications` and `POST /api/notifications/{id}/read`; notification records are scoped to their recipient.
+
+For a fresh local database, import `bayanalert_schema.sql` from a MySQL/MariaDB client or phpMyAdmin. It creates all application tables, including `notifications` and report coordinates, and seeds the required `admin`, `resident`, and compatibility `user` roles. It does not erase existing tables. The importing database user needs permission to create the `bayanalert_db` database, or you can select a database and remove the `CREATE DATABASE` and `USE` statements first.
+
+For an existing database, retain its data and apply the needed migrations instead of importing the fresh schema. Migrations are disabled by default in `app/config/migration.php`. To enable report locations on an existing schema, apply `app/migrations/003_add_hazard_report_coordinates.php` or run:
 
 ```sql
 ALTER TABLE hazard_reports
@@ -195,7 +201,41 @@ ALTER TABLE hazard_reports
     ADD COLUMN longitude DECIMAL(10,7) NULL;
 ```
 
-Migrations are disabled by default in `app/config/migration.php`. Until the columns exist, maps remain centered on Calapan without fabricated markers, and report submission continues to work using the address field.
+Apply `app/migrations/004_create_notifications_table.php` if the `notifications` table is missing; it creates that table and converts an existing enum `notification_type` column to a string column so all notification types are accepted.
+
+Apply `app/migrations/005_create_community_report_votes.php` to enable resident
+confirm/dispute votes in the community incident feed. Each resident can have
+one vote per report, change it between confirm and dispute, or remove it by
+selecting the active vote again. Report owners cannot vote on their own reports.
+The migration creates the `report_community_votes` table and should be applied
+to existing databases before deploying the updated community dashboard. If
+applying the migration manually, run:
+
+```sql
+CREATE TABLE report_community_votes (
+    vote_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    report_id INT UNSIGNED NOT NULL,
+    user_id INT UNSIGNED NOT NULL,
+    vote VARCHAR(10) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vote_id),
+    UNIQUE KEY report_community_vote_unique (report_id, user_id),
+    KEY report_community_votes_user_id_idx (user_id),
+    CONSTRAINT report_community_votes_report_fk
+        FOREIGN KEY (report_id) REFERENCES hazard_reports (report_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT report_community_votes_user_fk
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+The public Leaflet hazard map uses `GET /api/map/reports` and only returns category, status, and coordinates for located reports. Incident addresses and reporter details are not included. The map uses OpenStreetMap tiles and does not require a CARTO API key. Until the coordinate columns exist on an existing database, maps remain centered on Calapan without fabricated markers, and report submission continues to work using the address field.
+
+When residents pin a report on the map, the frontend uses OpenStreetMap
+Nominatim reverse geocoding to suggest an address. Residents can edit the
+suggestion or enter an address manually if lookup is unavailable.
 
 Create the admin role if it does not exist:
 
@@ -209,6 +249,20 @@ Generate a password hash locally, then use it when inserting an admin user:
 ```bash
 php -r "echo password_hash('replace-with-a-strong-password', PASSWORD_DEFAULT), PHP_EOL;"
 ```
+
+Store the complete output in `password_hash`; never store the raw password or an
+MD5/SHA hash. To reset an existing account, generate a fresh hash the same way
+and update only that account's row:
+
+```sql
+UPDATE users
+SET password_hash = '<paste-generated-hash>'
+WHERE username = 'admin';
+```
+
+Confirm the username/email belongs to the intended account and that
+`account_status` is `active`. Admin and resident accounts use the same password
+hash format, but must sign in through their matching login page.
 
 ```sql
 INSERT INTO users (role_id, full_name, email, username, password_hash, account_status)

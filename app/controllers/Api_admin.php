@@ -177,7 +177,32 @@ class Api_admin extends Controller
 
         try {
             $this->Admin_model->update_record($table, $id, $validation['data']);
-            api_response(null, 200, $info['label'] . ' record updated successfully.');
+
+            $message = $info['label'] . ' record updated successfully.';
+            if ($table === 'hazard_reports'
+                && isset($validation['data']['status'])
+                && (string) $record['status'] !== (string) $validation['data']['status']
+                && !empty($record['user_id'])) {
+                try {
+                    $this->db->raw(
+                        'INSERT INTO notifications (user_id, report_id, title, message, notification_type, is_read, created_at) ' .
+                        'VALUES (?, ?, ?, ?, ?, 0, NOW())',
+                        [
+                            (int) $record['user_id'],
+                            (int) $record['report_id'],
+                            'Report status updated',
+                            'Your report ' . ($record['reference_number'] ?: '#' . $record['report_id']) .
+                                ' is now ' . str_replace('_', ' ', strtolower((string) $validation['data']['status'])) . '.',
+                            'report_status'
+                        ]
+                    );
+                } catch (\Throwable $notificationError) {
+                    error_log('Report status notification failed for report ' . $record['report_id'] . ': ' . $notificationError->getMessage());
+                    $message .= ' Resident notification delivery failed.';
+                }
+            }
+
+            api_response(null, 200, $message);
         } catch (\PDOException $e) {
             error_log('Admin update failed for ' . $table . ': ' . $e->getMessage());
             api_error('Could not update record. Check for duplicate values or reference conflicts.', 400);

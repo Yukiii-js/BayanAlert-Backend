@@ -15,6 +15,15 @@ class Auth_model extends Model {
                         ->get();
     }
 
+    public function verify_password($password, $storedHash) {
+        if (!is_string($password) || $password === ''
+            || !is_string($storedHash) || $storedHash === '') {
+            return false;
+        }
+
+        return password_verify($password, $storedHash);
+    }
+
     public function get_user_by_email($email) {
         return $this->db->table($this->table)
                         ->where('email', $email)

@@ -172,12 +172,17 @@ class Api_reports extends Controller
         try {
             $reports = $this->db->raw(
                 'SELECT r.report_id, r.reference_number, r.category_id, r.title, r.description, r.status, r.submitted_at, ' .
-                'c.category_name, b.barangay_name ' .
+                'c.category_name, b.barangay_name, ' .
+                '(SELECT COUNT(*) FROM report_community_votes cv WHERE cv.report_id = r.report_id AND cv.vote = \'confirm\') AS confirm_count, ' .
+                '(SELECT COUNT(*) FROM report_community_votes dv WHERE dv.report_id = r.report_id AND dv.vote = \'dispute\') AS dispute_count, ' .
+                '(SELECT uv.vote FROM report_community_votes uv WHERE uv.report_id = r.report_id AND uv.user_id = ?) AS my_vote, ' .
+                '(r.user_id <> ?) AS can_vote ' .
                 'FROM hazard_reports r ' .
                 'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
                 'LEFT JOIN users u ON u.user_id = r.user_id ' .
                 'LEFT JOIN barangays b ON b.barangay_id = u.barangay_id ' .
-                'ORDER BY r.submitted_at DESC LIMIT 100'
+                'ORDER BY r.submitted_at DESC LIMIT 100',
+                [$this->userId(), $this->userId()]
             )->fetchAll(PDO::FETCH_ASSOC);
 
             $statusCounts = $this->db->raw(
@@ -219,6 +224,75 @@ class Api_reports extends Controller
         } catch (\Throwable $e) {
             error_log('Community dashboard error: ' . $e->getMessage());
             api_error('Unable to load current community data.', 500);
+        }
+    }
+
+    public function vote($id)
+    {
+        if (!$this->validId($id)) {
+            api_error('Invalid report ID.', 400);
+            return;
+        }
+
+        $input = $this->input();
+        if (!array_key_exists('vote', $input)) {
+            api_error('Choose confirm or dispute, or clear your existing vote.', 422);
+            return;
+        }
+
+        $vote = $input['vote'] ?? null;
+        if ($vote !== null && !in_array($vote, ['confirm', 'dispute'], true)) {
+            api_error('Choose confirm or dispute, or clear your existing vote.', 422);
+            return;
+        }
+
+        try {
+            $report = $this->db->raw(
+                'SELECT user_id FROM hazard_reports WHERE report_id = ?',
+                [(int) $id]
+            )->fetch(PDO::FETCH_ASSOC);
+
+            if (!$report) {
+                api_error('Report not found.', 404);
+                return;
+            }
+
+            if ((int) $report['user_id'] === $this->userId()) {
+                api_error('You cannot vote on your own report.', 403);
+                return;
+            }
+
+            if ($vote === null) {
+                $this->db->raw(
+                    'DELETE FROM report_community_votes WHERE report_id = ? AND user_id = ?',
+                    [(int) $id, $this->userId()]
+                );
+            } else {
+                $this->db->raw(
+                    'INSERT INTO report_community_votes (report_id, user_id, vote, created_at, updated_at) ' .
+                    'VALUES (?, ?, ?, NOW(), NOW()) ' .
+                    'ON DUPLICATE KEY UPDATE vote = VALUES(vote), updated_at = NOW()',
+                    [(int) $id, $this->userId(), $vote]
+                );
+            }
+
+            $summary = $this->db->raw(
+                'SELECT ' .
+                '(SELECT COUNT(*) FROM report_community_votes WHERE report_id = ? AND vote = \'confirm\') AS confirm_count, ' .
+                '(SELECT COUNT(*) FROM report_community_votes WHERE report_id = ? AND vote = \'dispute\') AS dispute_count, ' .
+                '(SELECT vote FROM report_community_votes WHERE report_id = ? AND user_id = ?) AS my_vote',
+                [(int) $id, (int) $id, (int) $id, $this->userId()]
+            )->fetch(PDO::FETCH_ASSOC);
+
+            api_response([
+                'report_id' => (int) $id,
+                'confirm_count' => (int) ($summary['confirm_count'] ?? 0),
+                'dispute_count' => (int) ($summary['dispute_count'] ?? 0),
+                'my_vote' => $summary['my_vote'] ?? null,
+            ], 200, 'Your community vote was saved.');
+        } catch (\Throwable $e) {
+            error_log('Community report vote failed for report ' . (int) $id . ': ' . $e->getMessage());
+            api_error('Unable to save your vote. Please try again.', 500);
         }
     }
 
@@ -278,10 +352,6 @@ class Api_reports extends Controller
         $input = $this->input();
 
         $categoryId = (int) ($input['category_id'] ?? 0);
-        $stationValue = $input['station_id'] ?? '';
-        $stationId = ($stationValue === '' || $stationValue === null)
-            ? null
-            : (int) $stationValue;
 
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
@@ -301,11 +371,6 @@ class Api_reports extends Controller
             return;
         }
 
-        if ($stationId !== null && $stationId < 1) {
-            api_error('Invalid station.', 422);
-            return;
-        }
-
         try {
             $category = $this->db->table('hazard_categories')
                 ->where('category_id', $categoryId)
@@ -317,24 +382,13 @@ class Api_reports extends Controller
                 return;
             }
 
-            if ($stationId !== null) {
-                $station = $this->db->table('stations')
-                    ->where('station_id', $stationId)
-                    ->get();
-
-                if (!$station) {
-                    api_error('Select a valid station.', 422);
-                    return;
-                }
-            }
-
             $referenceNumber = 'BA-' . date('YmdHis') . '-' . random_int(100, 999);
 
             $reportData = [
                 'reference_number' => $referenceNumber,
                 'user_id' => $this->userId(),
                 'category_id' => $categoryId,
-                'station_id' => $stationId,
+                'station_id' => null,
                 'title' => $title,
                 'description' => $description,
                 'address_details' => $address,
@@ -377,10 +431,30 @@ class Api_reports extends Controller
                 return;
             }
 
+            $notificationWarning = '';
+            try {
+                $adminNotifications = $this->db->raw(
+                    "INSERT INTO notifications (user_id, report_id, title, message, notification_type, is_read, created_at) " .
+                    "SELECT u.user_id, ?, 'New hazard report submitted', ?, 'new_report', 0, NOW() " .
+                    "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
+                    "WHERE r.role_name = 'admin' AND u.account_status = 'active'",
+                    [
+                        $reportId,
+                        'A resident submitted report ' . $referenceNumber . '. Review it in the report register.'
+                    ]
+                );
+                if ($adminNotifications->rowCount() < 1) {
+                    $notificationWarning = ' No active administrators were available to receive the notification.';
+                }
+            } catch (\Throwable $e) {
+                error_log('New report admin notification failed for report ' . $reportId . ': ' . $e->getMessage());
+                $notificationWarning = ' The report was saved, but administrator notifications could not be delivered.';
+            }
+
             api_response([
                 'report_id' => $reportId,
                 'reference_number' => $referenceNumber
-            ], 201, 'Hazard report submitted successfully.');
+            ], 201, 'Hazard report submitted successfully.' . $notificationWarning);
         } catch (\Throwable $e) {
             error_log('Report store error: ' . $e->getMessage());
             api_error('Unable to save the report.', 500);
@@ -397,10 +471,6 @@ class Api_reports extends Controller
         $input = $this->input();
 
         $categoryId = (int) ($input['category_id'] ?? 0);
-        $stationValue = $input['station_id'] ?? '';
-        $stationId = ($stationValue === '' || $stationValue === null)
-            ? null
-            : (int) $stationValue;
 
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
@@ -443,20 +513,8 @@ class Api_reports extends Controller
                 return;
             }
 
-            if ($stationId !== null) {
-                $station = $this->db->table('stations')
-                    ->where('station_id', $stationId)
-                    ->get();
-
-                if (!$station) {
-                    api_error('Select a valid station.', 422);
-                    return;
-                }
-            }
-
             $reportData = [
                 'category_id' => $categoryId,
-                'station_id' => $stationId,
                 'title' => $title,
                 'description' => $description,
                 'address_details' => $address,

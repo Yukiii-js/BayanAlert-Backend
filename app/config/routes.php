@@ -94,6 +94,11 @@ $router->post('api/categories/delete/{id}', 'Api_category::delete');
 // Resident Authentication API
 $router->post('api/auth/register', 'Api_auth::register');
 
+// Notifications and resident announcements
+$router->get('api/notifications', 'Api_notifications::index');
+$router->post('api/notifications/{id}/read', 'Api_notifications::markRead');
+$router->post('api/admin/announcements', 'Api_notifications::announce');
+
 // Barangay dropdown API
 $router->get('api/barangays', 'Api_barangays::index');
 
@@ -103,6 +108,7 @@ $router->get('api/reports/community', 'Api_reports::community');
 $router->get('api/map/reports', 'Api_map::reports');
 $router->get('api/reports', 'Api_reports::index');
 $router->post('api/reports', 'Api_reports::store');
+$router->post('api/reports/{id}/vote', 'Api_reports::vote');
 $router->get('api/reports/{id}', 'Api_reports::show');
 $router->put('api/reports/{id}', 'Api_reports::update');
 $router->post('api/reports/update/{id}', 'Api_reports::update');

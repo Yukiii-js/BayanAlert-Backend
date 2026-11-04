@@ -19,8 +19,9 @@ class Api_auth extends Controller {
 
         try {
             $user = $this->Auth_model->get_user_by_email_or_username($username);
-        } catch (\Exception $e) {
-            api_error('Database error: ' . $e->getMessage(), 500);
+        } catch (\PDOException $e) {
+            error_log('Authentication lookup failed: ' . $e->getMessage());
+            api_error('Authentication service is temporarily unavailable. Please try again.', 503);
         }
 
         if (!$user) {
@@ -34,7 +35,7 @@ class Api_auth extends Controller {
             api_error('Your account is not active. Please contact an administrator.', 403);
         }
 
-        if (!password_verify($password, $user['password_hash'])) {
+        if (!$this->Auth_model->verify_password($password, $user['password_hash'] ?? null)) {
             api_error('Invalid credentials.', 401);
         }
 
