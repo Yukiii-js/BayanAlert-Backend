@@ -123,6 +123,69 @@ class Api_reports extends Controller
         return $report;
     }
 
+    private function uploadRequestError()
+    {
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+        if (stripos($contentType, 'multipart/form-data') === false) {
+            return null;
+        }
+
+        $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+        $postMax = trim((string) ini_get('post_max_size'));
+        $unit = strtolower(substr($postMax, -1));
+        $postMaxBytes = (float) $postMax;
+
+        if ($unit === 'g') {
+            $postMaxBytes *= 1024 * 1024 * 1024;
+        } elseif ($unit === 'm') {
+            $postMaxBytes *= 1024 * 1024;
+        } elseif ($unit === 'k') {
+            $postMaxBytes *= 1024;
+        }
+
+        if ($contentLength > 0 && $postMaxBytes > 0
+            && $contentLength > $postMaxBytes
+            && empty($_POST) && empty($_FILES)) {
+            return [
+                'status' => 413,
+                'message' => 'The upload exceeds the server post_max_size limit. Increase PHP post_max_size and try again.'
+            ];
+        }
+
+        $files = $_FILES['evidence'] ?? null;
+        if (!$files || !isset($files['error'])) {
+            return null;
+        }
+
+        $errors = is_array($files['error']) ? $files['error'] : [$files['error']];
+        foreach ($errors as $error) {
+            if ($error === UPLOAD_ERR_OK || $error === UPLOAD_ERR_NO_FILE) {
+                continue;
+            }
+
+            if ($error === UPLOAD_ERR_INI_SIZE || $error === UPLOAD_ERR_FORM_SIZE) {
+                return [
+                    'status' => 413,
+                    'message' => 'An evidence file exceeds the PHP upload size limit. Increase PHP upload_max_filesize and post_max_size, then try again.'
+                ];
+            }
+
+            if ($error === UPLOAD_ERR_PARTIAL) {
+                return [
+                    'status' => 400,
+                    'message' => 'An evidence file was only partially uploaded. Please try again.'
+                ];
+            }
+
+            return [
+                'status' => 400,
+                'message' => 'An evidence file could not be uploaded. Check the server upload configuration and try again.'
+            ];
+        }
+
+        return null;
+    }
+
     public function index()
     {
         try {
@@ -184,6 +247,34 @@ class Api_reports extends Controller
                 'ORDER BY r.submitted_at DESC LIMIT 100',
                 [$this->userId(), $this->userId()]
             )->fetchAll(PDO::FETCH_ASSOC);
+
+            $reportIds = array_map(
+                static function ($report) {
+                    return (int) $report['report_id'];
+                },
+                $reports
+            );
+            $evidenceByReport = [];
+
+            if ($reportIds) {
+                $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
+                $evidence = $this->db->raw(
+                    'SELECT evidence_id, report_id, file_path, uploaded_at ' .
+                    'FROM report_evidence ' .
+                    'WHERE report_id IN (' . $placeholders . ') AND evidence_type = ? ' .
+                    'ORDER BY uploaded_at ASC, evidence_id ASC',
+                    array_merge($reportIds, ['photo'])
+                )->fetchAll(PDO::FETCH_ASSOC);
+
+                foreach ($evidence as $item) {
+                    $evidenceByReport[(int) $item['report_id']][] = $item;
+                }
+            }
+
+            foreach ($reports as &$report) {
+                $report['evidence'] = $evidenceByReport[(int) $report['report_id']] ?? [];
+            }
+            unset($report);
 
             $statusCounts = $this->db->raw(
                 'SELECT status, COUNT(*) AS total FROM hazard_reports GROUP BY status ORDER BY status'
@@ -349,6 +440,12 @@ class Api_reports extends Controller
 
     public function store()
     {
+        $uploadError = $this->uploadRequestError();
+        if ($uploadError !== null) {
+            api_error($uploadError['message'], $uploadError['status']);
+            return;
+        }
+
         $input = $this->input();
 
         $categoryId = (int) ($input['category_id'] ?? 0);
@@ -468,6 +565,12 @@ class Api_reports extends Controller
             return;
         }
 
+        $uploadError = $this->uploadRequestError();
+        if ($uploadError !== null) {
+            api_error($uploadError['message'], $uploadError['status']);
+            return;
+        }
+
         $input = $this->input();
 
         $categoryId = (int) ($input['category_id'] ?? 0);
@@ -566,7 +669,8 @@ class Api_reports extends Controller
             $names = $files['name'];
         }
 
-        $uploadDirectory = FCPATH . 'uploads/evidence/';
+        $uploadDirectory = ROOT_DIR . 'public' . DIRECTORY_SEPARATOR . 'uploads'
+            . DIRECTORY_SEPARATOR . 'evidence' . DIRECTORY_SEPARATOR;
 
         if (!is_dir($uploadDirectory) &&
             !mkdir($uploadDirectory, 0755, true) &&

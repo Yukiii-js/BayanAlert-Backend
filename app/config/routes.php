@@ -50,6 +50,9 @@ $router->post('auth/authenticate', 'Auth::authenticate');
 $router->post('auth/logout', 'Auth::logout');
 
 $router->get('admin', 'Admin::index');
+$router->get('admin/reports/hazards', 'AdminReportController::hazard_pdf');
+$router->get('api/admin/reports/hazards', 'AdminReportController::hazard_pdf');
+$router->get('api/admin/reports', 'AdminReportController::report_pdf');
 $router->get('admin/tables/{table}', 'Admin::table');
 $router->get('admin/tables/{table}/create', 'Admin::create');
 $router->post('admin/tables/{table}/store', 'Admin::store');

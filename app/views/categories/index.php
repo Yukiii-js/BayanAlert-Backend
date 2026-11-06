@@ -3,10 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <title>Hazard Categories</title>
+    <link rel="icon" type="image/png" href="<?= site_url('images/bayanalert-icon.png'); ?>">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
     <div class="container my-5">
+        <div class="d-flex align-items-center gap-3 mb-4">
+            <img src="<?= site_url('images/bayanalert-logo.png'); ?>" alt="BayanAlert" style="width: 48px; height: 48px; object-fit: contain;">
+            <div>
+                <strong class="d-block">BayanAlert</strong>
+                <small class="text-secondary">Calapan City Community Safety</small>
+            </div>
+        </div>
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h2>Hazard Categories</h2>
             <div>

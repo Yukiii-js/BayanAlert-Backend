@@ -156,6 +156,18 @@ lavalust/
 
 ## Configuration
 
+### PDF Reports
+
+Admin PDF reports use the standalone TCPDF 6.10.1 library bundled under
+`app/libraries/tcpdf`; Composer is not required. The LavaLust wrapper and report
+branding asset are `app/libraries/Pdf.php` and `app/libraries/assets/`. The PDF uses its opaque
+JPEG asset to remain compatible with PHP installations without GD or Imagick;
+the browser UI uses the transparent PNG version.
+Hazard reports list incidents for a date range. Barangay activity reports show
+active resident totals, incident status summaries, and report history grouped by
+the submitting resident's registered barangay. Keep the bundled TCPDF
+`LICENSE.TXT` when redistributing the application.
+
 ### Database
 
 **File:** `app/config/database.php`
