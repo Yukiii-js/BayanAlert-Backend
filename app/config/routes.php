@@ -96,6 +96,9 @@ $router->post('api/categories/delete/{id}', 'Api_category::delete');
 
 // Resident Authentication API
 $router->post('api/auth/register', 'Api_auth::register');
+$router->post('api/auth/send-registration-verification', 'Api_auth::sendRegistrationVerification');
+$router->post('api/auth/verify-email', 'Api_auth::verifyEmail');
+$router->post('api/auth/resend-verification', 'Api_auth::resendVerificationEmail');
 
 // Notifications and resident announcements
 $router->get('api/notifications', 'Api_notifications::index');
@@ -109,6 +112,7 @@ $router->get('api/barangays', 'Api_barangays::index');
 // Resident Reports API
 $router->get('api/reports/community', 'Api_reports::community');
 $router->get('api/map/reports', 'Api_map::reports');
+$router->get('api/weather/calapan', 'Api_weather::calapan');
 $router->get('api/reports', 'Api_reports::index');
 $router->post('api/reports', 'Api_reports::store');
 $router->post('api/reports/{id}/vote', 'Api_reports::vote');

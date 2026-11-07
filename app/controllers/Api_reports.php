@@ -73,6 +73,12 @@ class Api_reports extends Controller
             return null;
         }
 
+        if ((float) $latitude < 13.25 || (float) $latitude > 13.55
+            || (float) $longitude < 121.05 || (float) $longitude > 121.32) {
+            api_error('Select a map location within Calapan City, Oriental Mindoro.', 422);
+            return null;
+        }
+
         if (!$this->hasReportCoordinates()) {
             api_error('Map locations are not enabled until the report-coordinate migration is applied.', 503);
             return null;
@@ -244,8 +250,9 @@ class Api_reports extends Controller
                 'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
                 'LEFT JOIN users u ON u.user_id = r.user_id ' .
                 'LEFT JOIN barangays b ON b.barangay_id = u.barangay_id ' .
+                'WHERE (r.user_id IS NULL OR r.user_id <> ?) ' .
                 'ORDER BY r.submitted_at DESC LIMIT 100',
-                [$this->userId(), $this->userId()]
+                [$this->userId(), $this->userId(), $this->userId()]
             )->fetchAll(PDO::FETCH_ASSOC);
 
             $reportIds = array_map(
@@ -259,11 +266,11 @@ class Api_reports extends Controller
             if ($reportIds) {
                 $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
                 $evidence = $this->db->raw(
-                    'SELECT evidence_id, report_id, file_path, uploaded_at ' .
+                    'SELECT evidence_id, report_id, file_path, evidence_type, uploaded_at ' .
                     'FROM report_evidence ' .
-                    'WHERE report_id IN (' . $placeholders . ') AND evidence_type = ? ' .
+                    'WHERE report_id IN (' . $placeholders . ') AND evidence_type IN (?, ?) ' .
                     'ORDER BY uploaded_at ASC, evidence_id ASC',
-                    array_merge($reportIds, ['photo'])
+                    array_merge($reportIds, ['photo', 'video'])
                 )->fetchAll(PDO::FETCH_ASSOC);
 
                 foreach ($evidence as $item) {

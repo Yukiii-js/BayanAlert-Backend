@@ -187,6 +187,16 @@ $database['main'] = array(
 );
 ```
 
+### Calapan weather forecast
+
+The resident and admin dashboards read current conditions and a three-day
+forecast from WeatherAPI.com through `GET /api/weather/calapan`. The backend
+fixes the requested coordinates to Calapan City and keeps the WeatherAPI key server-side.
+Create `BayanAlert-Backend/.env` from `.env.example` and set `WEATHERAPI_KEY`
+to a key from your WeatherAPI.com account. The frontend does not need or expose
+the provider key. The resident dashboard can show one-time weather-change
+reminders; the admin dashboard displays conditions without resident reminders.
+
 ## BayanAlert admin category management
 
 The application includes an admin-only BayanAlert management panel at `/admin` and an admin sign-in page at `/auth/login`. Import the BayanAlert MySQL schema before using the application. Admin accounts must have a matching row in `roles` with `role_name = 'admin'`, and their `users.account_status` must be `active`.
@@ -242,6 +252,88 @@ CREATE TABLE report_community_votes (
         ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
+
+### Brevo transactional email
+
+The backend sends a 24-hour email verification link after resident registration
+and sends approved hazard reports to the configured emergency department. The
+registration form can also request verification beside the email field before
+account creation. Registration remains available without email verification,
+but residents cannot sign in until they verify; administrator activation is a
+separate requirement. Copy
+`.env.example` to `.env` and set `BREVO_API_KEY` from your Brevo account, along
+with the sender identity and public frontend/backend URLs. Keep `.env` private;
+never put the Brevo key in the frontend or commit it. The sender email must be
+verified with Brevo. `FRONTEND_URL` is the frontend origin used in verification
+links, while `APP_BASE_URL` is the public backend origin used for evidence links.
+Brevo's successful API response confirms that a message was queued, not that it
+reached the recipient's inbox.
+
+Apply `app/migrations/006_create_email_verification_tokens.php` to an existing
+database, or run this SQL once in the selected database:
+
+```sql
+CREATE TABLE email_verification_tokens (
+    verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id INT UNSIGNED NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (verification_id),
+    UNIQUE KEY email_verification_user_unique (user_id),
+    UNIQUE KEY email_verification_token_unique (token_hash),
+    CONSTRAINT email_verification_user_fk
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+The verification endpoints create the required token tables on first use, so
+the registration form's Verify button does not depend on migrations being
+enabled. The migration `app/migrations/007_create_registration_email_verifications.php`
+is also available for environments where database tables must be provisioned
+before application requests. This table stores short-lived hashed tokens for
+addresses that have not yet been registered. To provision it manually, run:
+
+```sql
+CREATE TABLE registration_email_verifications (
+    verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    email VARCHAR(150) NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    verified_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (verification_id),
+    UNIQUE KEY registration_email_verification_email_unique (email),
+    UNIQUE KEY registration_email_verification_token_unique (token_hash),
+    KEY registration_email_verification_expiry_idx (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+For an existing database, preserve sign-in for previously approved residents by
+grandfathering active accounts before enabling email-verification checks:
+
+```sql
+UPDATE users
+SET email_verified_at = NOW()
+WHERE account_status = 'active'
+  AND email_verified_at IS NULL
+  AND role_id IN (SELECT role_id FROM roles WHERE role_name IN ('resident', 'user'));
+```
+
+Verification endpoints are `POST /api/auth/verify-email` with `{"token":"..."}`,
+`POST /api/auth/resend-verification` with `{"email":"..."}`, and
+`POST /api/auth/send-registration-verification` with `{"email":"..."}`.
+
+When an admin marks a hazard report `verified` or `approved`, the edit form
+preselects the routed department email, shows the report details to be sent, and
+allows the admin to change the recipient or disable email delivery before
+approving. Categories without an automatic route require a valid recipient
+address or the admin can turn off the email. The default destinations are DOH,
+BFP, CDRRMO, and PCG as configured in `BrevoMailer`.
+
+If a Brevo API key has been shared in chat, rotate/revoke it in Brevo and set the
+replacement only in the backend `.env`.
 
 The public Leaflet hazard map uses `GET /api/map/reports` and only returns category, status, and coordinates for located reports. Incident addresses and reporter details are not included. The map uses OpenStreetMap tiles and does not require a CARTO API key. Until the coordinate columns exist on an existing database, maps remain centered on Calapan without fabricated markers, and report submission continues to work using the address field.
 

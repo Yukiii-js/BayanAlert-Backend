@@ -9,7 +9,7 @@ class Auth_model extends Model {
     public function get_user_by_email_or_username($login) {
         return $this->db->table($this->table)
                         ->join('roles', 'roles.role_id = users.role_id')
-                        ->select('users.user_id, users.role_id, users.full_name, users.password_hash, users.account_status, roles.role_name')
+                        ->select('users.user_id, users.role_id, users.full_name, users.password_hash, users.account_status, users.email_verified_at, roles.role_name')
                         ->where('users.email', $login)
                         ->or_where('users.username', $login)
                         ->get();

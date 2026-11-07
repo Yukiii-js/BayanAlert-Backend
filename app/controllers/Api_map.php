@@ -27,7 +27,8 @@ class Api_map extends Controller
                     'SELECT r.category_id, r.status, r.latitude, r.longitude, c.category_name ' .
                     'FROM hazard_reports r ' .
                     'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
-                    'WHERE r.latitude IS NOT NULL AND r.longitude IS NOT NULL ' .
+                    'WHERE r.latitude BETWEEN 13.25 AND 13.55 ' .
+                    'AND r.longitude BETWEEN 121.05 AND 121.32 ' .
                     'ORDER BY r.submitted_at DESC LIMIT 500'
                 )->fetchAll(PDO::FETCH_ASSOC);
             }

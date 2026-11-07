@@ -282,11 +282,75 @@ class Admin_model extends Model
                 ->select('status, COUNT(*) AS total')
                 ->group_by('status')
                 ->get_all();
-            $recentReports = $this->db->table('hazard_reports')
-                ->select('report_id, reference_number, title, status, submitted_at')
+            $recentReportColumns = [
+                'hazard_reports.report_id',
+                'hazard_reports.reference_number',
+                'hazard_reports.title',
+                'hazard_reports.description',
+                'hazard_reports.address_details',
+                'hazard_reports.status',
+                'hazard_reports.submitted_at',
+                'hazard_reports.category_id',
+                'hazard_reports.station_id',
+            ];
+
+            if (!empty($availableTables['hazard_categories'])) {
+                $recentReportColumns[] = 'hazard_categories.category_name';
+            }
+            if (!empty($availableTables['stations'])) {
+                $recentReportColumns[] = 'stations.station_name';
+            }
+
+            $recentReportsQuery = $this->db->table('hazard_reports')
+                ->select(implode(', ', $recentReportColumns));
+            if (!empty($availableTables['hazard_categories'])) {
+                $recentReportsQuery->left_join(
+                    'hazard_categories',
+                    'hazard_categories.category_id = hazard_reports.category_id'
+                );
+            }
+            if (!empty($availableTables['stations'])) {
+                $recentReportsQuery->left_join(
+                    'stations',
+                    'stations.station_id = hazard_reports.station_id'
+                );
+            }
+
+            $recentReports = $recentReportsQuery
                 ->order_by('submitted_at', 'DESC')
                 ->limit(6)
                 ->get_all();
+
+            foreach ($recentReports as &$report) {
+                $report['evidence'] = [];
+            }
+            unset($report);
+
+            if ($recentReports && !empty($availableTables['report_evidence'])) {
+                $reportIds = array_map(
+                    static function ($report) {
+                        return (int) $report['report_id'];
+                    },
+                    $recentReports
+                );
+                $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
+                $evidence = $this->db->raw(
+                    'SELECT evidence_id, report_id, file_path, evidence_type, description, uploaded_at ' .
+                    'FROM report_evidence ' .
+                    'WHERE report_id IN (' . $placeholders . ') AND evidence_type IN (?, ?) ' .
+                    'ORDER BY uploaded_at ASC, evidence_id ASC',
+                    array_merge($reportIds, ['photo', 'video'])
+                )->fetchAll(PDO::FETCH_ASSOC);
+                $evidenceByReport = [];
+
+                foreach ($evidence as $item) {
+                    $evidenceByReport[(int) $item['report_id']][] = $item;
+                }
+                foreach ($recentReports as &$report) {
+                    $report['evidence'] = $evidenceByReport[(int) $report['report_id']] ?? [];
+                }
+                unset($report);
+            }
         }
 
         $activeUsers = !empty($availableTables['users'])
@@ -392,6 +456,59 @@ class Admin_model extends Model
         return $this->db->table($table)
             ->where($info['primary_key'], $id)
             ->get();
+    }
+
+    public function get_hazard_notification_data($reportId)
+    {
+        $reportColumns = array_column(
+            $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')->fetchAll(PDO::FETCH_ASSOC),
+            'Field'
+        );
+        $coordinates = [];
+        if (in_array('latitude', $reportColumns, true)) {
+            $coordinates[] = 'r.latitude';
+        } else {
+            $coordinates[] = 'NULL AS latitude';
+        }
+        if (in_array('longitude', $reportColumns, true)) {
+            $coordinates[] = 'r.longitude';
+        } else {
+            $coordinates[] = 'NULL AS longitude';
+        }
+
+        $severityColumn = in_array('severity_level', $reportColumns, true)
+            ? 'severity_level'
+            : (in_array('severity', $reportColumns, true) ? 'severity' : null);
+        $severity = $severityColumn !== null
+            ? 'r.`' . $severityColumn . '` AS severity_level'
+            : "'Not specified' AS severity_level";
+
+        $report = $this->db->raw(
+            'SELECT r.report_id, r.reference_number, r.title, r.description, r.address_details, r.status, ' .
+            'r.submitted_at, c.category_name, u.full_name AS reporter_name, ' .
+            implode(', ', $coordinates) . ', ' . $severity . ' ' .
+            'FROM hazard_reports r ' .
+            'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
+            'LEFT JOIN users u ON u.user_id = r.user_id ' .
+            'WHERE r.report_id = ? LIMIT 1',
+            [(int) $reportId]
+        )->fetch(PDO::FETCH_ASSOC);
+
+        if (!$report) {
+            return null;
+        }
+
+        $report['media'] = [];
+        if ($this->table_exists('report_evidence')) {
+            $report['media'] = $this->db->raw(
+                "SELECT file_path, evidence_type FROM report_evidence " .
+                "WHERE report_id = ? AND evidence_type IN ('photo', 'video') " .
+                'ORDER BY uploaded_at ASC, evidence_id ASC',
+                [(int) $reportId]
+            )->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        return $report;
     }
 
     public function get_reference_options($table, $field)
