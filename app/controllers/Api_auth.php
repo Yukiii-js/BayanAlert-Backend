@@ -25,12 +25,25 @@ class Api_auth extends Controller {
             api_error('Authentication service is temporarily unavailable. Please try again.', 503);
         }
 
+        error_log('LOGIN USER FOUND: ' . ($user ? 'YES' : 'NO'));
+
         if (!$user) {
+            error_log('LOGIN FAILED: User not found.');
             api_error('Invalid credentials.', 401);
+            return;
         }
 
-        if (!$this->Auth_model->verify_password($password, $user['password_hash'] ?? null)) {
+        $passwordValid = $this->Auth_model->verify_password(
+            $password,
+            $user['password_hash'] ?? null
+        );
+
+        error_log('LOGIN PASSWORD MATCH: ' . ($passwordValid ? 'YES' : 'NO'));
+
+        if (!$passwordValid) {
+            error_log('LOGIN FAILED: Password does not match.');
             api_error('Invalid credentials.', 401);
+            return;
         }
 
         if (in_array(strtolower((string) $user['role_name']), ['resident', 'user'], true)
