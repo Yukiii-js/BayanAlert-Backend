@@ -21,6 +21,20 @@ class Auth_model extends Model {
             error_log('AUTH QUERY METHODS: ' . implode(', ', get_class_methods($result)));
         }
 
+        error_log('AUTH RESULT COUNT: ' . count($result));
+        error_log('AUTH RESULT KEYS: ' . implode(', ', array_keys($result)));
+
+        if (!empty($result)) {
+            error_log('AUTH FIRST ROW TYPE: ' . gettype($result[0]));
+
+            if (is_array($result[0]) || is_object($result[0])) {
+                error_log(
+                    'AUTH FIRST ROW FIELDS: ' .
+                    implode(', ', array_keys((array) $result[0]))
+                );
+            }
+        }
+
         return $result;
         }
 
