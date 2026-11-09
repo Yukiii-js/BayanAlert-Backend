@@ -12,11 +12,17 @@ class Auth_model extends Model {
                        ->select('users.user_id, users.role_id, users.full_name, users.password_hash, users.account_status, users.email_verified_at, roles.role_name')
                        ->where('users.email', $login)
                        ->or_where('users.username', $login)
-                       ->get()
-                       ->row();
+                       ->get();
 
-        return $result ? (array) $result : null;
-    }
+        error_log('AUTH QUERY RESULT TYPE: ' . gettype($result));
+
+        if (is_object($result)) {
+            error_log('AUTH QUERY CLASS: ' . get_class($result));
+            error_log('AUTH QUERY METHODS: ' . implode(', ', get_class_methods($result)));
+        }
+
+        return $result;
+        }
 
     public function verify_password($password, $storedHash) {
         if (!is_string($password) || $password === ''
