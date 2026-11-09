@@ -6,37 +6,21 @@ class Auth_model extends Model {
     protected $table = 'users';
     protected $primary_key = 'user_id';
 
-    public function get_user_by_email_or_username($login) {
-    $result = $this->db->table($this->table)
-                       ->join('roles', 'roles.role_id = users.role_id')
-                       ->select('users.user_id, users.role_id, users.full_name, users.password_hash, users.account_status, users.email_verified_at, roles.role_name')
-                       ->where('users.email', $login)
-                       ->or_where('users.username', $login)
-                       ->get();
+    
+    public function get_user_by_email_or_username($login)
+    {
+        $result = $this->db->table($this->table)
+            ->join('roles', 'roles.role_id = users.role_id')
+            ->select('users.user_id, users.role_id, users.full_name, users.password_hash, users.account_status, users.email_verified_at, roles.role_name')
+            ->where('users.email', $login)
+            ->or_where('users.username', $login)
+            ->get();
 
-        error_log('AUTH QUERY RESULT TYPE: ' . gettype($result));
+        return is_array($result) && !empty($result)
+            ? $result
+            : null;
+    }
 
-        if (is_object($result)) {
-            error_log('AUTH QUERY CLASS: ' . get_class($result));
-            error_log('AUTH QUERY METHODS: ' . implode(', ', get_class_methods($result)));
-        }
-
-        error_log('AUTH RESULT COUNT: ' . count($result));
-        error_log('AUTH RESULT KEYS: ' . implode(', ', array_keys($result)));
-
-        if (!empty($result)) {
-            error_log('AUTH FIRST ROW TYPE: ' . gettype($result[0]));
-
-            if (is_array($result[0]) || is_object($result[0])) {
-                error_log(
-                    'AUTH FIRST ROW FIELDS: ' .
-                    implode(', ', array_keys((array) $result[0]))
-                );
-            }
-        }
-
-        return $result;
-        }
 
     public function verify_password($password, $storedHash) {
         if (!is_string($password) || $password === ''
