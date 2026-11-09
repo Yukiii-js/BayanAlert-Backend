@@ -50,10 +50,46 @@ class Api_weather extends Controller
         }
 
         $weather = json_decode($responseBody, true);
-        if (!is_array($weather)
-            || !isset($weather['location'], $weather['current'], $weather['forecast']['forecastday'])
-            || !is_array($weather['forecast']['forecastday'])) {
-            error_log('Calapan weather error: WeatherAPI returned an invalid forecast response.');
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log(
+                'Calapan weather JSON error: ' . json_last_error_msg()
+            );
+
+            api_error('Weather API returned invalid JSON.', 502);
+            return;
+        }
+
+        if (!is_array($weather)) {
+            error_log('Calapan weather error: Response is not a JSON object.');
+
+            api_error('Weather API returned an invalid response.', 502);
+            return;
+        }
+
+        if (isset($weather['error'])) {
+            error_log(
+                'Calapan WeatherAPI error: ' .
+                json_encode($weather['error'])
+            );
+
+            api_error('Weather provider rejected the request.', 502);
+            return;
+        }
+
+        if (
+            !isset(
+                $weather['location'],
+                $weather['current'],
+                $weather['forecast']['forecastday']
+            ) ||
+            !is_array($weather['forecast']['forecastday'])
+        ) {
+            error_log(
+                'Calapan weather error: Missing required forecast fields. ' .
+                'Received keys: ' . implode(', ', array_keys($weather))
+            );
+
             api_error('Weather forecast returned an invalid response.', 502);
             return;
         }
