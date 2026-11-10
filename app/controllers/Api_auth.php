@@ -13,9 +13,18 @@ class Api_auth extends Controller {
         $input = get_request_input();
         $username = isset($input['username']) && is_string($input['username']) ? trim($input['username']) : '';
         $password = isset($input['password']) && is_string($input['password']) ? $input['password'] : '';
+        $expectedRole = isset($input['expected_role']) && is_string($input['expected_role'])
+            ? strtolower(trim($input['expected_role']))
+            : '';
 
         if (empty($username) || empty($password)) {
             api_error('Username/email and password are required.', 400);
+            return;
+        }
+
+        if (!in_array($expectedRole, ['admin', 'resident'], true)) {
+            api_error('A valid login type is required.', 400);
+            return;
         }
 
         try {
@@ -25,10 +34,7 @@ class Api_auth extends Controller {
             api_error('Authentication service is temporarily unavailable. Please try again.', 503);
         }
 
-        error_log('LOGIN USER FOUND: ' . ($user ? 'YES' : 'NO'));
-
         if (!$user) {
-            error_log('LOGIN FAILED: User not found.');
             api_error('Invalid credentials.', 401);
             return;
         }
@@ -38,16 +44,20 @@ class Api_auth extends Controller {
             $user['password_hash'] ?? null
         );
 
-        error_log('LOGIN PASSWORD MATCH: ' . ($passwordValid ? 'YES' : 'NO'));
-
         if (!$passwordValid) {
-            error_log('LOGIN FAILED: Password does not match.');
             api_error('Invalid credentials.', 401);
             return;
         }
 
-        if (in_array(strtolower((string) $user['role_name']), ['resident', 'user'], true)
-            && empty($user['email_verified_at'])) {
+        $roleName = strtolower(trim((string) ($user['role_name'] ?? '')));
+        $isResident = in_array($roleName, ['resident', 'user'], true);
+        if (($expectedRole === 'admin' && $roleName !== 'admin')
+            || ($expectedRole === 'resident' && !$isResident)) {
+            api_error('Invalid credentials.', 401);
+            return;
+        }
+
+        if ($isResident && empty($user['email_verified_at'])) {
             api_error('Please verify your email address before signing in. You can resend the verification email below.', 403);
             return;
         }
@@ -401,8 +411,11 @@ class Api_auth extends Controller {
         }
 
         try {
+            $this->ensureEmailVerificationTables();
             $user = $this->Auth_model->get_user_by_email($email);
-            if ($user && empty($user['email_verified_at'])) {
+            if ($user
+                && in_array(strtolower(trim((string) ($user['role_name'] ?? ''))), ['resident', 'user'], true)
+                && empty($user['email_verified_at'])) {
                 $recentToken = $this->db->raw(
                     'SELECT verification_id FROM email_verification_tokens ' .
                     'WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) LIMIT 1',
@@ -417,8 +430,48 @@ class Api_auth extends Controller {
                     );
                     if (!$result['success']) {
                         error_log('Verification email could not be resent for user ID ' . (int) $user['user_id'] . '.');
+                        api_error($result['error'] ?? 'Verification email could not be sent. Please try again later.', 503);
+                        return;
                     }
                 }
+            } elseif (!$user) {
+                $registrationVerification = $this->db->raw(
+                    'SELECT verified_at, ' .
+                    '(created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND)) AS is_recent ' .
+                    'FROM registration_email_verifications WHERE email = ? LIMIT 1',
+                    [$email]
+                )->fetch(\PDO::FETCH_ASSOC);
+
+                if ($registrationVerification && !empty($registrationVerification['verified_at'])) {
+                    api_response(['email_sent' => false], 200, 'This email address is already verified. You can continue creating your account.');
+                    return;
+                }
+
+                if ($registrationVerification && !empty($registrationVerification['is_recent'])) {
+                    api_response(['email_sent' => true], 200, 'A verification email was sent recently. Check your inbox.');
+                    return;
+                }
+
+                $token = bin2hex(random_bytes(32));
+                $this->db->raw(
+                    'INSERT INTO registration_email_verifications (email, token_hash, expires_at, verified_at, created_at) ' .
+                    'VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY), NULL, NOW()) ' .
+                    'ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), expires_at = VALUES(expires_at), ' .
+                    'verified_at = NULL, created_at = NOW()',
+                    [$email, hash('sha256', $token)]
+                );
+                $result = (new BrevoMailer())->sendVerificationEmail($email, '', $token);
+                if (!$result['success']) {
+                    $this->db->raw(
+                        'DELETE FROM registration_email_verifications WHERE email = ? AND token_hash = ?',
+                        [$email, hash('sha256', $token)]
+                    );
+                    api_error($result['error'] ?? 'Verification email could not be sent. Please try again later.', 503);
+                    return;
+                }
+
+                api_response(['email_sent' => true], 200, 'Verification link sent. Open it from your inbox before registering.');
+                return;
             }
 
             api_response(null, 200, 'If the account is eligible, a verification email has been sent.');
@@ -438,7 +491,15 @@ class Api_auth extends Controller {
             [$userId, hash('sha256', $token)]
         );
 
-        return (new BrevoMailer())->sendVerificationEmail($email, $fullName, $token);
+        $result = (new BrevoMailer())->sendVerificationEmail($email, $fullName, $token);
+        if (!$result['success']) {
+            $this->db->raw(
+                'DELETE FROM email_verification_tokens WHERE user_id = ? AND token_hash = ?',
+                [$userId, hash('sha256', $token)]
+            );
+        }
+
+        return $result;
     }
 
     private function ensureEmailVerificationTables()

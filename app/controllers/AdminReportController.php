@@ -8,8 +8,7 @@ class AdminReportController extends Controller
         parent::__construct();
         $currentUser = require_api_auth();
 
-        if (strtolower(trim((string) ($currentUser['role_name'] ?? ''))) !== 'admin'
-            && (string) ($currentUser['role_id'] ?? '') !== '1') {
+        if (strtolower(trim((string) ($currentUser['role_name'] ?? ''))) !== 'admin') {
             api_error('Forbidden: Administrator access required.', 403);
         }
 
