@@ -41,7 +41,6 @@ class Api_weather extends Controller
         $responseBody = curl_exec($curl);
         $statusCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
         $curlError = curl_error($curl);
-        curl_close($curl);
 
         if (!is_string($responseBody) || $statusCode !== 200) {
             error_log('Calapan weather request failed: HTTP ' . $statusCode . ($curlError ? ' ' . $curlError : ''));
