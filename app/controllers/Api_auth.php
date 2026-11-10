@@ -13,9 +13,12 @@ class Api_auth extends Controller {
         $input = get_request_input();
         $username = isset($input['username']) && is_string($input['username']) ? trim($input['username']) : '';
         $password = isset($input['password']) && is_string($input['password']) ? $input['password'] : '';
-        $expectedRole = isset($input['expected_role']) && is_string($input['expected_role'])
-            ? strtolower(trim($input['expected_role']))
-            : '';
+        $expectedRole = 'resident';
+        if (array_key_exists('expected_role', $input)) {
+            $expectedRole = is_string($input['expected_role'])
+                ? strtolower(trim($input['expected_role']))
+                : '';
+        }
 
         if (empty($username) || empty($password)) {
             api_error('Username/email and password are required.', 400);
