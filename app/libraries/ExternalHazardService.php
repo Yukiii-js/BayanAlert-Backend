@@ -6,6 +6,7 @@ class ExternalHazardService
 {
     private const DEFAULT_CENTER_LAT = 13.4117;
     private const DEFAULT_CENTER_LON = 121.1803;
+    private $providerStatus = [];
 
     public function getResidentFeed(): array
     {
@@ -21,6 +22,7 @@ class ExternalHazardService
 
         return [
             'generated_at' => gmdate('c'),
+            'providers' => $this->providerStatus,
             'summary' => [
                 'total' => count($allEvents),
                 'usgs' => count($usgsEvents),
@@ -139,12 +141,14 @@ class ExternalHazardService
         $response = $this->httpGet('https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=' . urlencode(date('Y-m-d', strtotime('-7 days'))) . '&latitude=13.4117&longitude=121.1803&maxradiuskm=300&minmagnitude=2.5');
 
         if (!$response) {
-            return $this->fallbackUsgsEvents();
+            $this->providerStatus['usgs'] = ['status' => 'error', 'message' => 'USGS could not be reached.'];
+            return [];
         }
 
         $decoded = json_decode($response, true);
-        if (!is_array($decoded) || empty($decoded['features'])) {
-            return $this->fallbackUsgsEvents();
+        if (!is_array($decoded) || !isset($decoded['features']) || !is_array($decoded['features'])) {
+            $this->providerStatus['usgs'] = ['status' => 'error', 'message' => 'USGS returned an invalid response.'];
+            return [];
         }
 
         $events = [];
@@ -180,11 +184,14 @@ class ExternalHazardService
                 'affected_population' => null,
                 'event_timestamp' => gmdate('c', (int) (($properties['time'] ?? time() * 1000) / 1000)),
                 'alert_level' => $alert !== '' ? strtoupper($alert) : 'GREEN',
+                'tsunami' => !empty($properties['tsunami']),
+                'event_url' => $properties['url'] ?? null,
                 'is_published_to_residents' => $published ? 1 : 0,
                 'raw_payload' => $feature,
             ];
         }
 
+        $this->providerStatus['usgs'] = ['status' => 'online', 'message' => null];
         return $events;
     }
 
@@ -193,13 +200,19 @@ class ExternalHazardService
         $response = $this->httpGet('https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?fromdate=' . urlencode(date('Y-m-d', strtotime('-7 days'))) . '&todate=' . urlencode(date('Y-m-d')) . '&alertlevel=Green');
 
         if (!$response) {
-            return $this->fallbackGdacsEvents();
+            $this->providerStatus['gdacs'] = ['status' => 'error', 'message' => 'GDACS could not be reached.'];
+            return [];
         }
 
         $decoded = json_decode($response, true);
-        $features = $decoded['features'] ?? $decoded['events'] ?? $decoded ?? [];
-        if (!is_array($features) || $features === []) {
-            return $this->fallbackGdacsEvents();
+        if (!is_array($decoded)) {
+            $this->providerStatus['gdacs'] = ['status' => 'error', 'message' => 'GDACS returned invalid JSON.'];
+            return [];
+        }
+        $features = $decoded['features'] ?? $decoded['events'] ?? null;
+        if (!is_array($features)) {
+            $this->providerStatus['gdacs'] = ['status' => 'error', 'message' => 'GDACS returned an unrecognized response.'];
+            return [];
         }
 
         $events = [];
@@ -228,54 +241,14 @@ class ExternalHazardService
                 'affected_population' => (int) ($properties['population'] ?? 0),
                 'event_timestamp' => gmdate('c', strtotime((string) ($properties['fromdate'] ?? gmdate('c')))),
                 'alert_level' => $alert,
+                'event_url' => $properties['url'] ?? $properties['urlreport'] ?? null,
                 'is_published_to_residents' => $distance <= 500 ? 1 : 0,
                 'raw_payload' => $feature,
             ];
         }
 
+        $this->providerStatus['gdacs'] = ['status' => 'online', 'message' => null];
         return $events;
-    }
-
-    private function fallbackUsgsEvents(): array
-    {
-        return [[
-            'id' => 'usgs-demo-1',
-            'source' => 'USGS',
-            'hazard_type' => 'EQ',
-            'title' => 'Mindoro seismic swarm',
-            'severity_level' => 'orange',
-            'magnitude_or_score' => 4.6,
-            'depth_km' => 22.5,
-            'latitude' => 13.2954,
-            'longitude' => 121.0921,
-            'distance_to_municipality_km' => 16.79,
-            'affected_population' => null,
-            'event_timestamp' => gmdate('c', strtotime('-1 day')),
-            'alert_level' => 'YELLOW',
-            'is_published_to_residents' => 1,
-            'raw_payload' => [],
-        ]];
-    }
-
-    private function fallbackGdacsEvents(): array
-    {
-        return [[
-            'id' => 'gdacs-demo-1',
-            'source' => 'GDACS',
-            'hazard_type' => 'TC',
-            'title' => 'Tropical cyclone advisory',
-            'severity_level' => 'orange',
-            'magnitude_or_score' => 6.2,
-            'depth_km' => null,
-            'latitude' => 13.74,
-            'longitude' => 121.52,
-            'distance_to_municipality_km' => 85.12,
-            'affected_population' => 25000,
-            'event_timestamp' => gmdate('c', strtotime('-4 hours')),
-            'alert_level' => 'ORANGE',
-            'is_published_to_residents' => 1,
-            'raw_payload' => [],
-        ]];
     }
 
     private function httpGet(string $url): ?string
@@ -296,9 +269,10 @@ class ExternalHazardService
 
         $body = curl_exec($curl);
         $error = curl_error($curl);
+        $statusCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
         curl_close($curl);
 
-        if (!is_string($body) || $body === '' || $error !== '') {
+        if (!is_string($body) || $body === '' || $error !== '' || $statusCode < 200 || $statusCode >= 300) {
             return null;
         }
 
