@@ -197,6 +197,15 @@ to a key from your WeatherAPI.com account. The frontend does not need or expose
 the provider key. The resident dashboard can show one-time weather-change
 reminders; the admin dashboard displays conditions without resident reminders.
 
+### External hazard feed
+
+The backend also exposes a lightweight external hazard feed at `GET /api/external/resident-feed`
+for USGS seismic events, GDACS regional alerts, and HDX overlay metadata. The admin APIs
+at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, and
+`PATCH /api/admin/external-apis/{key}/config` allow health checks, manual sync triggers,
+and configuration updates without exposing the provider keys to the browser. The related
+migration `app/migrations/008_create_external_api_tables.php` creates the supporting tables.
+
 ## BayanAlert admin category management
 
 The application includes an admin-only BayanAlert management panel at `/admin` and an admin sign-in page at `/auth/login`. Import the BayanAlert MySQL schema before using the application. Admin accounts must have a matching row in `roles` with `role_name = 'admin'`, and their `users.account_status` must be `active`.
