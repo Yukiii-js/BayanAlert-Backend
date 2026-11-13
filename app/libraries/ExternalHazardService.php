@@ -197,7 +197,7 @@ class ExternalHazardService
 
     private function fetchGdacsEvents(): array
     {
-        $response = $this->httpGet('https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?fromdate=' . urlencode(date('Y-m-d', strtotime('-7 days'))) . '&todate=' . urlencode(date('Y-m-d')) . '&alertlevel=Green');
+        $response = $this->httpGet('https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?fromdate=' . urlencode(date('Y-m-d', strtotime('-7 days'))) . '&todate=' . urlencode(date('Y-m-d')) . '&alertlevel=Green&iso3=PHL');
 
         if (!$response) {
             $this->providerStatus['gdacs'] = ['status' => 'error', 'message' => 'GDACS could not be reached.'];
@@ -224,8 +224,25 @@ class ExternalHazardService
             $longitude = (float) ($coordinates['longitude'] ?? 0);
             $eventType = strtoupper((string) ($properties['eventtype'] ?? $properties['type'] ?? 'TC'));
             $alert = strtoupper((string) ($properties['alertlevel'] ?? 'GREEN'));
-            $score = (float) ($properties['severity'] ?? $properties['score'] ?? 0);
+            $score = (float) ($properties['severitydata']['severity'] ?? $properties['severity'] ?? $properties['alertscore'] ?? $properties['score'] ?? 0);
             $distance = self::haversineKm($latitude, $longitude, self::DEFAULT_CENTER_LAT, self::DEFAULT_CENTER_LON);
+            $affectedCountries = $properties['affectedcountries'] ?? [];
+            $isPhilippinesEvent = strtoupper((string) ($properties['iso3'] ?? '')) === 'PHL';
+            if (!$isPhilippinesEvent && is_array($affectedCountries)) {
+                foreach ($affectedCountries as $country) {
+                    if (strtoupper((string) ($country['iso3'] ?? '')) === 'PHL') {
+                        $isPhilippinesEvent = true;
+                        break;
+                    }
+                }
+            }
+            if (!$isPhilippinesEvent && $distance > 500) {
+                continue;
+            }
+            $providerUrl = $properties['url'] ?? null;
+            $eventUrl = is_array($providerUrl)
+                ? ($providerUrl['report'] ?? $providerUrl['details'] ?? null)
+                : (is_string($providerUrl) ? $providerUrl : null);
 
             $events[] = [
                 'id' => 'gdacs-' . preg_replace('/[^A-Za-z0-9_-]+/', '-', (string) ($properties['eventid'] ?? $properties['name'] ?? uniqid('gdacs', true))),
@@ -241,8 +258,8 @@ class ExternalHazardService
                 'affected_population' => (int) ($properties['population'] ?? 0),
                 'event_timestamp' => gmdate('c', strtotime((string) ($properties['fromdate'] ?? gmdate('c')))),
                 'alert_level' => $alert,
-                'event_url' => $properties['url'] ?? $properties['urlreport'] ?? null,
-                'is_published_to_residents' => $distance <= 500 ? 1 : 0,
+                'event_url' => $eventUrl ?? $properties['urlreport'] ?? null,
+                'is_published_to_residents' => ($distance <= 500 || $isPhilippinesEvent) ? 1 : 0,
                 'raw_payload' => $feature,
             ];
         }
