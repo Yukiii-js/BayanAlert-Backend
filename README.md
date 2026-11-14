@@ -217,6 +217,16 @@ base URL and redeploy the frontend. Set the backend's `FRONTEND_URL` to the
 frontend origin so API responses and login preflight requests receive the correct
 CORS headers before database startup.
 
+### Persistent evidence uploads
+
+Render's web-service filesystem is temporary unless a persistent disk is mounted.
+Create a disk on the backend service mounted at `/var/data` and set
+`BAYANALERT_EVIDENCE_DIR=/var/data/evidence`. New uploads are written there and
+served through `GET /api/media/evidence/{filename}`. For local development, the
+default remains `public/uploads/evidence`. Existing evidence URLs that return
+404 are missing from the deployed filesystem and must be restored from a backup
+or re-uploaded; the database stores their paths, not the image contents.
+
 ## BayanAlert admin category management
 
 The application includes an admin-only BayanAlert management panel at `/admin` and an admin sign-in page at `/auth/login`. Import the BayanAlert MySQL schema before using the application. Admin accounts must have a matching row in `roles` with `role_name = 'admin'`, and their `users.account_status` must be `active`.

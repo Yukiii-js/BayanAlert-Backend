@@ -285,6 +285,13 @@ class BrevoMailer
 
         $filePath = ltrim(str_replace('\\', '/', $filePath), '/');
         $baseUrl = rtrim(trim((string) getenv('APP_BASE_URL')), '/');
+        if (strpos($filePath, 'uploads/evidence/') === 0) {
+            $filename = substr($filePath, strlen('uploads/evidence/'));
+            return $baseUrl !== ''
+                ? $baseUrl . '/api/media/evidence/' . rawurlencode($filename)
+                : '';
+        }
+
         return $baseUrl !== '' ? $baseUrl . '/' . $filePath : $filePath;
     }
 

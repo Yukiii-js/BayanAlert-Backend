@@ -110,6 +110,7 @@ $router->get('api/barangays', 'Api_barangays::index');
 
 
 // Resident Reports API
+$router->get('api/media/evidence/{filename}', 'Api_media::evidence');
 $router->get('api/reports/community', 'Api_reports::community');
 $router->get('api/map/reports', 'Api_map::reports');
 $router->get('api/weather/calapan', 'Api_weather::calapan');

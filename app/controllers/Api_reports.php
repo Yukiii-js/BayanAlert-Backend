@@ -2,6 +2,8 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
+require_once APP_DIR . 'libraries/EvidenceStorage.php';
+
 class Api_reports extends Controller
 {
     private $currentUser;
@@ -676,8 +678,7 @@ class Api_reports extends Controller
             $names = $files['name'];
         }
 
-        $uploadDirectory = ROOT_DIR . 'public' . DIRECTORY_SEPARATOR . 'uploads'
-            . DIRECTORY_SEPARATOR . 'evidence' . DIRECTORY_SEPARATOR;
+        $uploadDirectory = EvidenceStorage::directory();
 
         if (!is_dir($uploadDirectory) &&
             !mkdir($uploadDirectory, 0755, true) &&
