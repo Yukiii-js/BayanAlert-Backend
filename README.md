@@ -156,6 +156,18 @@ lavalust/
 
 ## Configuration
 
+### PDF Reports
+
+Admin PDF reports use the standalone TCPDF 6.10.1 library bundled under
+`app/libraries/tcpdf`; Composer is not required. The LavaLust wrapper and report
+branding asset are `app/libraries/Pdf.php` and `app/libraries/assets/`. The PDF uses its opaque
+JPEG asset to remain compatible with PHP installations without GD or Imagick;
+the browser UI uses the transparent PNG version.
+Hazard reports list incidents for a date range. Barangay activity reports show
+active resident totals, incident status summaries, and report history grouped by
+the submitting resident's registered barangay. Keep the bundled TCPDF
+`LICENSE.TXT` when redistributing the application.
+
 ### Database
 
 **File:** `app/config/database.php`
@@ -175,6 +187,36 @@ $database['main'] = array(
 );
 ```
 
+The database username can be provided as `DB_USER` (the `.env.example` name) or
+`DB_USERNAME`; if both are set, `DB_USERNAME` takes precedence.
+
+### Calapan weather forecast
+
+The resident and admin dashboards read current conditions and a three-day
+forecast from WeatherAPI.com through `GET /api/weather/calapan`. The backend
+fixes the requested coordinates to Calapan City and keeps the WeatherAPI key server-side.
+Create `BayanAlert-Backend/.env` from `.env.example` and set `WEATHERAPI_KEY`
+to a key from your WeatherAPI.com account. The frontend does not need or expose
+the provider key. The resident dashboard can show one-time weather-change
+reminders; the admin dashboard displays conditions without resident reminders.
+
+### External hazard feed
+
+The backend also exposes a lightweight external hazard feed at `GET /api/external/resident-feed`
+for USGS seismic events, GDACS regional alerts, and HDX overlay metadata. The admin APIs
+at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, and
+`PATCH /api/admin/external-apis/{key}/config` allow health checks, manual sync triggers,
+and configuration updates without exposing the provider keys to the browser. The related
+migration `app/migrations/008_create_external_api_tables.php` creates the supporting tables.
+USGS and GDACS are public feeds and do not require API keys. For production, set
+`APP_ENV=production` and set a random `APP_KEY` in the backend host's environment;
+the key is required for CSRF protection and must not be committed. Generate one
+with `php -r "echo bin2hex(random_bytes(32));"`. When the frontend is hosted
+separately, set its build-time `VITE_API_URL` to this backend's public `/api`
+base URL and redeploy the frontend. Set the backend's `FRONTEND_URL` to the
+frontend origin so API responses and login preflight requests receive the correct
+CORS headers before database startup.
+
 ## BayanAlert admin category management
 
 The application includes an admin-only BayanAlert management panel at `/admin` and an admin sign-in page at `/auth/login`. Import the BayanAlert MySQL schema before using the application. Admin accounts must have a matching row in `roles` with `role_name = 'admin'`, and their `users.account_status` must be `active`.
@@ -185,7 +227,139 @@ The hazard category CRUD is available in the panel under **Directory → Hazard 
 
 New resident registrations are assigned to the configured `resident` role, or `user` role when that is the resident role name in the database, and saved with `account_status = 'pending'`. An administrator must activate the account before the resident can sign in. The Users register displays role and barangay names while retaining their IDs in the edit form.
 
-The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications (plus any global notifications). Report responses omit reporter identity and exact address details.
+The frontend keeps one authenticated account type per browser at a time. Sign out of an admin account before signing in as a resident, or sign out of a resident account before signing in as an admin. This session guard is synchronized across tabs in the same browser.
+
+The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications. Community reports include confirm/dispute totals and the signed-in resident's vote; `POST /api/reports/{id}/vote` accepts `{"vote":"confirm"}`, `{"vote":"dispute"}`, or `{"vote":null}` to remove a vote. Each resident has one changeable vote per report and cannot vote on their own report. Report responses omit reporter identity and exact address details.
+
+The admin portal's **Notifications** page shows new-report notifications and lets admins publish announcements. `POST /api/admin/announcements` sends a notification to every active account with the `resident` or `user` role. Residents receive notifications when an admin changes the status of one of their reports and can mark notifications as read. The notification APIs are `GET /api/notifications` and `POST /api/notifications/{id}/read`; notification records are scoped to their recipient.
+
+For a fresh local database, import `bayanalert_schema.sql` from a MySQL/MariaDB client or phpMyAdmin. It creates all application tables, including `notifications` and report coordinates, and seeds the required `admin`, `resident`, and compatibility `user` roles. It does not erase existing tables. The importing database user needs permission to create the `bayanalert_db` database, or you can select a database and remove the `CREATE DATABASE` and `USE` statements first.
+
+For an existing database, retain its data and apply the needed migrations instead of importing the fresh schema. Migrations are disabled by default in `app/config/migration.php`. To enable report locations on an existing schema, apply `app/migrations/003_add_hazard_report_coordinates.php` or run:
+
+```sql
+ALTER TABLE hazard_reports
+    ADD COLUMN latitude DECIMAL(10,7) NULL,
+    ADD COLUMN longitude DECIMAL(10,7) NULL;
+```
+
+Apply `app/migrations/004_create_notifications_table.php` if the `notifications` table is missing; it creates that table and converts an existing enum `notification_type` column to a string column so all notification types are accepted.
+
+Apply `app/migrations/005_create_community_report_votes.php` to enable resident
+confirm/dispute votes in the community incident feed. Each resident can have
+one vote per report, change it between confirm and dispute, or remove it by
+selecting the active vote again. Report owners cannot vote on their own reports.
+The migration creates the `report_community_votes` table and should be applied
+to existing databases before deploying the updated community dashboard. If
+applying the migration manually, run:
+
+```sql
+CREATE TABLE report_community_votes (
+    vote_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    report_id INT UNSIGNED NOT NULL,
+    user_id INT UNSIGNED NOT NULL,
+    vote VARCHAR(10) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vote_id),
+    UNIQUE KEY report_community_vote_unique (report_id, user_id),
+    KEY report_community_votes_user_id_idx (user_id),
+    CONSTRAINT report_community_votes_report_fk
+        FOREIGN KEY (report_id) REFERENCES hazard_reports (report_id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT report_community_votes_user_fk
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+        ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+### Brevo transactional email
+
+The backend sends a 24-hour email verification link after resident registration
+and sends approved hazard reports to the configured emergency department. The
+registration form can also request verification beside the email field before
+account creation. Registration remains available without email verification,
+but residents cannot sign in until they verify; administrator activation is a
+separate requirement. Copy
+`.env.example` to `.env` and set `BREVO_API_KEY` from your Brevo account, along
+with the sender identity and public frontend/backend URLs. Keep `.env` private;
+never put the Brevo key in the frontend or commit it. The sender email must be
+verified with Brevo. `FRONTEND_URL` is the frontend origin used in verification
+links, while `APP_BASE_URL` is the public backend origin used for evidence links.
+Brevo's successful API response confirms that a message was queued, not that it
+reached the recipient's inbox.
+
+Apply `app/migrations/006_create_email_verification_tokens.php` to an existing
+database, or run this SQL once in the selected database:
+
+```sql
+CREATE TABLE email_verification_tokens (
+    verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id INT UNSIGNED NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (verification_id),
+    UNIQUE KEY email_verification_user_unique (user_id),
+    UNIQUE KEY email_verification_token_unique (token_hash),
+    CONSTRAINT email_verification_user_fk
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+The verification endpoints create the required token tables on first use, so
+the registration form's Verify button does not depend on migrations being
+enabled. The migration `app/migrations/007_create_registration_email_verifications.php`
+is also available for environments where database tables must be provisioned
+before application requests. This table stores short-lived hashed tokens for
+addresses that have not yet been registered. To provision it manually, run:
+
+```sql
+CREATE TABLE registration_email_verifications (
+    verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    email VARCHAR(150) NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    verified_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (verification_id),
+    UNIQUE KEY registration_email_verification_email_unique (email),
+    UNIQUE KEY registration_email_verification_token_unique (token_hash),
+    KEY registration_email_verification_expiry_idx (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+For an existing database, preserve sign-in for previously approved residents by
+grandfathering active accounts before enabling email-verification checks:
+
+```sql
+UPDATE users
+SET email_verified_at = NOW()
+WHERE account_status = 'active'
+  AND email_verified_at IS NULL
+  AND role_id IN (SELECT role_id FROM roles WHERE role_name IN ('resident', 'user'));
+```
+
+Verification endpoints are `POST /api/auth/verify-email` with `{"token":"..."}`,
+`POST /api/auth/resend-verification` with `{"email":"..."}`, and
+`POST /api/auth/send-registration-verification` with `{"email":"..."}`.
+
+When an admin marks a hazard report `verified` or `approved`, the edit form
+preselects the routed department email, shows the report details to be sent, and
+allows the admin to change the recipient or disable email delivery before
+approving. Categories without an automatic route require a valid recipient
+address or the admin can turn off the email. The default destinations are DOH,
+BFP, CDRRMO, and PCG as configured in `BrevoMailer`.
+
+If a Brevo API key has been shared in chat, rotate/revoke it in Brevo and set the
+replacement only in the backend `.env`.
+
+The public Leaflet hazard map uses `GET /api/map/reports` and only returns category, status, and coordinates for located reports. Incident addresses and reporter details are not included. The map uses OpenStreetMap tiles and does not require a CARTO API key. Until the coordinate columns exist on an existing database, maps remain centered on Calapan without fabricated markers, and report submission continues to work using the address field.
+
+When residents pin a report on the map, the frontend uses OpenStreetMap
+Nominatim reverse geocoding to suggest an address. Residents can edit the
+suggestion or enter an address manually if lookup is unavailable.
 
 Create the admin role if it does not exist:
 
@@ -199,6 +373,20 @@ Generate a password hash locally, then use it when inserting an admin user:
 ```bash
 php -r "echo password_hash('replace-with-a-strong-password', PASSWORD_DEFAULT), PHP_EOL;"
 ```
+
+Store the complete output in `password_hash`; never store the raw password or an
+MD5/SHA hash. To reset an existing account, generate a fresh hash the same way
+and update only that account's row:
+
+```sql
+UPDATE users
+SET password_hash = '<paste-generated-hash>'
+WHERE username = 'admin';
+```
+
+Confirm the username/email belongs to the intended account and that
+`account_status` is `active`. Admin and resident accounts use the same password
+hash format, but must sign in through their matching login page.
 
 ```sql
 INSERT INTO users (role_id, full_name, email, username, password_hash, account_status)

@@ -50,6 +50,9 @@ $router->post('auth/authenticate', 'Auth::authenticate');
 $router->post('auth/logout', 'Auth::logout');
 
 $router->get('admin', 'Admin::index');
+$router->get('admin/reports/hazards', 'AdminReportController::hazard_pdf');
+$router->get('api/admin/reports/hazards', 'AdminReportController::hazard_pdf');
+$router->get('api/admin/reports', 'AdminReportController::report_pdf');
 $router->get('admin/tables/{table}', 'Admin::table');
 $router->get('admin/tables/{table}/create', 'Admin::create');
 $router->post('admin/tables/{table}/store', 'Admin::store');
@@ -93,6 +96,14 @@ $router->post('api/categories/delete/{id}', 'Api_category::delete');
 
 // Resident Authentication API
 $router->post('api/auth/register', 'Api_auth::register');
+$router->post('api/auth/send-registration-verification', 'Api_auth::sendRegistrationVerification');
+$router->post('api/auth/verify-email', 'Api_auth::verifyEmail');
+$router->post('api/auth/resend-verification', 'Api_auth::resendVerificationEmail');
+
+// Notifications and resident announcements
+$router->get('api/notifications', 'Api_notifications::index');
+$router->post('api/notifications/{id}/read', 'Api_notifications::markRead');
+$router->post('api/admin/announcements', 'Api_notifications::announce');
 
 // Barangay dropdown API
 $router->get('api/barangays', 'Api_barangays::index');
@@ -100,8 +111,18 @@ $router->get('api/barangays', 'Api_barangays::index');
 
 // Resident Reports API
 $router->get('api/reports/community', 'Api_reports::community');
+$router->get('api/map/reports', 'Api_map::reports');
+$router->get('api/weather/calapan', 'Api_weather::calapan');
+$router->get('api/external/resident-feed', 'ExternalApiController::residentFeed');
+$router->get('api/admin/external-apis', 'ExternalApiController::adminApis');
+$router->post('api/admin/external-apis/{key}/sync', 'ExternalApiController::syncApi');
+$router->patch('api/admin/external-apis/{key}/config', 'ExternalApiController::updateConfig');
+$router->post('api/admin/external-apis/{key}/config', 'ExternalApiController::updateConfig');
+$router->patch('api/admin/external-events/{id}/visibility', 'ExternalApiController::toggleVisibility');
+$router->post('api/admin/external-events/{id}/visibility', 'ExternalApiController::toggleVisibility');
 $router->get('api/reports', 'Api_reports::index');
 $router->post('api/reports', 'Api_reports::store');
+$router->post('api/reports/{id}/vote', 'Api_reports::vote');
 $router->get('api/reports/{id}', 'Api_reports::show');
 $router->put('api/reports/{id}', 'Api_reports::update');
 $router->post('api/reports/update/{id}', 'Api_reports::update');

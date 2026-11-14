@@ -1,5 +1,6 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
+require_once APP_DIR . 'libraries' . DIRECTORY_SEPARATOR . 'BrevoMailer.php';
 
 class Api_admin extends Controller
 {
@@ -121,7 +122,10 @@ class Api_admin extends Controller
             'table'      => $table,
             'table_info' => $info,
             'record'     => $record,
-            'fields'     => $fields
+            'fields'     => $fields,
+            'notification' => $table === 'hazard_reports'
+                ? $this->getHazardNotificationPreview((int) $id)
+                : null
         ]);
     }
 
@@ -176,12 +180,108 @@ class Api_admin extends Controller
         }
 
         try {
+            $oldStatus = strtolower(trim((string) ($record['status'] ?? '')));
+            $newStatus = strtolower(trim((string) ($validation['data']['status'] ?? '')));
+            $isNewlyApproved = $table === 'hazard_reports'
+                && in_array($newStatus, ['approved', 'verified'], true)
+                && !in_array($oldStatus, ['approved', 'verified'], true);
+            $sendDepartmentEmail = !isset($input['send_department_email'])
+                || !in_array($input['send_department_email'], [false, 0, '0', 'false'], true);
+            $notificationEmail = isset($input['department_email']) && is_string($input['department_email'])
+                ? trim($input['department_email'])
+                : '';
+            $hazardReport = null;
+
+            if ($isNewlyApproved && $sendDepartmentEmail) {
+                $hazardReport = $this->Admin_model->get_hazard_notification_data((int) $id);
+                $defaultDepartment = $hazardReport
+                    ? (new BrevoMailer())->getDepartmentDetailsForCategory(
+                        (string) ($hazardReport['category_name'] ?? '')
+                    )
+                    : null;
+                if ($notificationEmail === '' && $defaultDepartment) {
+                    $notificationEmail = $defaultDepartment['email'];
+                }
+                if (!filter_var($notificationEmail, FILTER_VALIDATE_EMAIL)) {
+                    api_error('Enter a valid notification contact email or turn off department email before approving.', 422);
+                    return;
+                }
+            }
+
             $this->Admin_model->update_record($table, $id, $validation['data']);
-            api_response(null, 200, $info['label'] . ' record updated successfully.');
+
+            $message = $info['label'] . ' record updated successfully.';
+
+            if ($table === 'hazard_reports'
+                && isset($validation['data']['status'])
+                && (string) $record['status'] !== (string) $validation['data']['status']
+                && !empty($record['user_id'])) {
+                try {
+                    $this->db->raw(
+                        'INSERT INTO notifications (user_id, report_id, title, message, notification_type, is_read, created_at) ' .
+                        'VALUES (?, ?, ?, ?, ?, 0, NOW())',
+                        [
+                            (int) $record['user_id'],
+                            (int) $record['report_id'],
+                            'Report status updated',
+                            'Your report ' . ($record['reference_number'] ?: '#' . $record['report_id']) .
+                                ' is now ' . str_replace('_', ' ', strtolower((string) $validation['data']['status'])) . '.',
+                            'report_status'
+                        ]
+                    );
+                } catch (\Throwable $notificationError) {
+                    error_log('Report status notification failed for report ' . $record['report_id'] . ': ' . $notificationError->getMessage());
+                    $message .= ' Resident notification delivery failed.';
+                }
+            }
+
+            if ($isNewlyApproved && $sendDepartmentEmail) {
+                try {
+                    if ($hazardReport) {
+                        $hazardReport['notification_email'] = $notificationEmail;
+                    }
+                    $emailResult = $hazardReport
+                        ? (new BrevoMailer())->sendHazardNotificationToDepartment($hazardReport)
+                        : ['success' => false, 'error' => 'Approved report details could not be loaded.'];
+
+                    if ($emailResult['success']) {
+                        $message .= ' Department notification email queued.';
+                    } else {
+                        error_log(
+                            'Department email was not queued for report ' . (int) $id . ': ' .
+                            ($emailResult['error'] ?? 'Unknown email error.')
+                        );
+                        $message .= ' Report approved, but the department notification email could not be queued.';
+                    }
+                } catch (\Throwable $emailError) {
+                    error_log('Department email failed for report ' . (int) $id . ': ' . $emailError->getMessage());
+                    $message .= ' Report approved, but the department notification email could not be queued.';
+                }
+            }
+
+            api_response(null, 200, $message);
         } catch (\PDOException $e) {
             error_log('Admin update failed for ' . $table . ': ' . $e->getMessage());
             api_error('Could not update record. Check for duplicate values or reference conflicts.', 400);
         }
+    }
+
+    private function getHazardNotificationPreview($reportId)
+    {
+        $report = $this->Admin_model->get_hazard_notification_data($reportId);
+        if (!$report) {
+            return null;
+        }
+
+        $department = (new BrevoMailer())->getDepartmentDetailsForCategory(
+            (string) ($report['category_name'] ?? '')
+        );
+
+        return [
+            'report' => $report,
+            'department' => $department,
+            'default_email' => $department['email'] ?? ''
+        ];
     }
 
     public function delete($table, $id)

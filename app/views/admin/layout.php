@@ -16,6 +16,7 @@ if ($view_page === 'table' || $view_page === 'form') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/png" href="<?= site_url('images/bayanalert-icon.png'); ?>">
     <title><?= $e($pageTitle); ?> · BayanAlert Admin</title>
     <style>
         :root {
@@ -40,7 +41,7 @@ if ($view_page === 'table' || $view_page === 'form') {
         .shell { min-height: 100vh; }
         .sidebar { position: fixed; inset: 0 auto 0 0; width: 258px; background: var(--navy); color: #d8e2f2; display: flex; flex-direction: column; z-index: 10; overflow-y: auto; }
         .brand { display: flex; align-items: center; gap: 12px; padding: 22px 20px; border-bottom: 1px solid rgba(255,255,255,.08); }
-        .brand-mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; background: linear-gradient(145deg, #23c3ce, #1573e6); color: white; font-weight: 900; font-size: 18px; box-shadow: 0 7px 20px rgba(18,137,201,.25); }
+        .brand-mark { display: block; width: 42px; height: 42px; object-fit: contain; }
         .brand-title { color: white; font-size: 18px; font-weight: 850; letter-spacing: -.4px; }
         .brand-sub { margin-top: 3px; color: #91a4c0; font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
         .brand-title, .brand-sub, .signed-name, .signed-role { display: block; }
@@ -162,7 +163,7 @@ if ($view_page === 'table' || $view_page === 'form') {
 <div class="shell">
     <aside class="sidebar" id="adminSidebar">
         <a class="brand" href="<?= site_url('admin'); ?>">
-            <span class="brand-mark">B</span>
+            <img class="brand-mark" src="<?= site_url('images/bayanalert-logo.png'); ?>" alt="BayanAlert">
             <span><span class="brand-title">BayanAlert</span><span class="brand-sub">Command center</span></span>
         </a>
         <nav class="side-nav">

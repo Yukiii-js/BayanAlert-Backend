@@ -5,9 +5,6 @@ if (!function_exists('api_response')) {
     function api_response($data = null, $status = 200, $message = 'Success') {
         if (!headers_sent()) {
             header('Content-Type: application/json; charset=utf-8');
-            header('Access-Control-Allow-Origin: *');
-            header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-            header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, Accept');
             http_response_code($status);
         }
 
@@ -29,9 +26,6 @@ if (!function_exists('api_error')) {
     function api_error($message = 'An error occurred', $status = 400, $extra = []) {
         if (!headers_sent()) {
             header('Content-Type: application/json; charset=utf-8');
-            header('Access-Control-Allow-Origin: *');
-            header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-            header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, Accept');
             http_response_code($status);
         }
 

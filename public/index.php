@@ -78,6 +78,31 @@ define('SYSTEM_DIR', ROOT_DIR . $system_path . DIRECTORY_SEPARATOR);
 define('APP_DIR', ROOT_DIR . $application_folder . DIRECTORY_SEPARATOR);
 define('PUBLIC_DIR', $public_folder);
 
+$allowedOrigins = [
+    'https://bayanalert-frontend-2.onrender.com',
+];
+$frontendUrl = getenv('FRONTEND_URL');
+if ($frontendUrl) {
+    $frontendOrigin = parse_url($frontendUrl);
+    if (isset($frontendOrigin['scheme'], $frontendOrigin['host'])) {
+        $allowedOrigins[] = $frontendOrigin['scheme'] . '://' . $frontendOrigin['host']
+            . (isset($frontendOrigin['port']) ? ':' . $frontendOrigin['port'] : '');
+    }
+}
+
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+if (in_array($origin, $allowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Vary: Origin');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Accept, Content-Type, Authorization, X-Requested-With');
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
 /*
  * ------------------------------------------------------
  * Setup done? Then Hurray!
