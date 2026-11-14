@@ -259,35 +259,6 @@ if (empty($url)) $url = '/';
 
 /*
 |--------------------------------------------------------------------------
-| CORS CONFIGURATION
-|--------------------------------------------------------------------------
-*/
-
-$allowed_origins = [
-    'https://bayanalert-frontend-2.onrender.com'
-];
-
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-
-if (in_array($origin, $allowed_origins, true)) {
-
-    header("Access-Control-Allow-Origin: " . $origin);
-    header("Vary: Origin");
-    header("Access-Control-Allow-Credentials: true");
-
-    header("Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS");
-
-    header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
-}
-
-// Handle browser preflight requests
-if ($method === 'OPTIONS') {
-    http_response_code(204);
-    exit;
-}
-
-/*
-|--------------------------------------------------------------------------
 | INITIALIZE ROUTER
 |--------------------------------------------------------------------------
 */

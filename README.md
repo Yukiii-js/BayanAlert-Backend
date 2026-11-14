@@ -187,6 +187,9 @@ $database['main'] = array(
 );
 ```
 
+The database username can be provided as `DB_USER` (the `.env.example` name) or
+`DB_USERNAME`; if both are set, `DB_USERNAME` takes precedence.
+
 ### Calapan weather forecast
 
 The resident and admin dashboards read current conditions and a three-day
@@ -208,6 +211,8 @@ migration `app/migrations/008_create_external_api_tables.php` creates the suppor
 USGS and GDACS are public feeds and do not require API keys. For production, set
 `APP_ENV=production`; when the frontend is hosted separately, set its build-time
 `VITE_API_URL` to this backend's public `/api` base URL and redeploy the frontend.
+Set the backend's `FRONTEND_URL` to the frontend origin so API responses and
+login preflight requests receive the correct CORS headers before database startup.
 
 ## BayanAlert admin category management
 
