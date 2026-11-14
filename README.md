@@ -205,6 +205,9 @@ at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, a
 `PATCH /api/admin/external-apis/{key}/config` allow health checks, manual sync triggers,
 and configuration updates without exposing the provider keys to the browser. The related
 migration `app/migrations/008_create_external_api_tables.php` creates the supporting tables.
+USGS and GDACS are public feeds and do not require API keys. For production, set
+`APP_ENV=production`; when the frontend is hosted separately, set its build-time
+`VITE_API_URL` to this backend's public `/api` base URL and redeploy the frontend.
 
 ## BayanAlert admin category management
 

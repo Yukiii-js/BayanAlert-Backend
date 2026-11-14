@@ -287,7 +287,6 @@ class ExternalHazardService
         $body = curl_exec($curl);
         $error = curl_error($curl);
         $statusCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        curl_close($curl);
 
         if (!is_string($body) || $body === '' || $error !== '' || $statusCode < 200 || $statusCode >= 300) {
             return null;
