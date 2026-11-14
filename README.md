@@ -209,10 +209,13 @@ at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, a
 and configuration updates without exposing the provider keys to the browser. The related
 migration `app/migrations/008_create_external_api_tables.php` creates the supporting tables.
 USGS and GDACS are public feeds and do not require API keys. For production, set
-`APP_ENV=production`; when the frontend is hosted separately, set its build-time
-`VITE_API_URL` to this backend's public `/api` base URL and redeploy the frontend.
-Set the backend's `FRONTEND_URL` to the frontend origin so API responses and
-login preflight requests receive the correct CORS headers before database startup.
+`APP_ENV=production` and set a random `APP_KEY` in the backend host's environment;
+the key is required for CSRF protection and must not be committed. Generate one
+with `php -r "echo bin2hex(random_bytes(32));"`. When the frontend is hosted
+separately, set its build-time `VITE_API_URL` to this backend's public `/api`
+base URL and redeploy the frontend. Set the backend's `FRONTEND_URL` to the
+frontend origin so API responses and login preflight requests receive the correct
+CORS headers before database startup.
 
 ## BayanAlert admin category management
 

@@ -80,8 +80,6 @@ define('PUBLIC_DIR', $public_folder);
 
 $allowedOrigins = [
     'https://bayanalert-frontend-2.onrender.com',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
 ];
 $frontendUrl = getenv('FRONTEND_URL');
 if ($frontendUrl) {
