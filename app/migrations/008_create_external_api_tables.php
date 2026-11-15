@@ -42,7 +42,7 @@ class Create_external_api_tables
                     'id' => ['type' => 'INT', 'unsigned' => TRUE, 'auto_increment' => TRUE, 'null' => FALSE],
                     'source' => ['type' => 'VARCHAR', 'constraint' => 16, 'null' => FALSE],
                     'external_event_id' => ['type' => 'VARCHAR', 'constraint' => 128, 'null' => FALSE],
-                    'hazard_type' => ['type' => 'VARCHAR', 'constraint' => 8, 'null' => FALSE],
+                    'hazard_type' => ['type' => 'VARCHAR', 'constraint' => 24, 'null' => FALSE],
                     'title' => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => FALSE],
                     'severity_level' => ['type' => 'VARCHAR', 'constraint' => 16, 'null' => TRUE],
                     'magnitude_or_score' => ['type' => 'DECIMAL', 'constraint' => '5,2', 'null' => TRUE],
