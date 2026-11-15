@@ -146,3 +146,12 @@ CREATE TABLE IF NOT EXISTS `system_apis` (
     UNIQUE KEY `system_apis_api_key_unique` (`api_key`),
     KEY `system_apis_category_idx` (`category`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+DELETE FROM `external_hazard_events`
+WHERE `source` IN ('NASA_EONET', 'RELIEFWEB', 'OPEN_METEO');
+
+DELETE FROM `external_api_configs`
+WHERE `api_key` IN ('nasa_eonet', 'reliefweb', 'open_meteo');
+
+DELETE FROM `system_apis`
+WHERE `api_key` IN ('nasa_eonet', 'reliefweb', 'open_meteo');

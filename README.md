@@ -213,7 +213,7 @@ reminders; the admin dashboard displays conditions without resident reminders.
 ### External hazard feed
 
 The backend also exposes a lightweight external hazard feed at `GET /api/external/resident-feed`
-for USGS seismic events, GDACS regional alerts, and HDX overlay metadata. The admin APIs
+for USGS earthquakes, GDACS multi-hazard and tropical cyclone alerts, and HDX overlay metadata. The admin APIs
 at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, and
 `PATCH /api/admin/external-apis/{key}/config` allow health checks, manual sync triggers,
 and configuration updates without exposing the provider keys to the browser. The related
@@ -227,7 +227,8 @@ listing, create/update, connection testing, cache/rate-limit reset, and deletion
 For a manual phpMyAdmin/MySQL alternative, select the BayanAlert database and run
 [`manual_migrations_external_api_004_008_009_010.sql`](./manual_migrations_external_api_004_008_009_010.sql)
 instead of applying migrations `004`, `008`, `009`, and `010` separately. It is safe to re-run
-and expands `external_hazard_events.hazard_type` for the normalized USGS, GDACS, and Open-Meteo values.
+and expands `external_hazard_events.hazard_type` for normalized hazard types. It also removes
+retired NASA EONET, ReliefWeb, and Open-Meteo integration rows and cached events.
 After importing the BayanAlert schema, run
 [`manual_migration_011_barangays_moderation_resolved.sql`](./manual_migration_011_barangays_moderation_resolved.sql)
 to seed the 62 Calapan barangays and approximate map centers, add report and barangay coordinates,

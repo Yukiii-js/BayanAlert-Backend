@@ -62,13 +62,6 @@ class ExternalHazardService
                 'auth_header_type' => 'none',
                 'auth_header_name' => null,
             ],
-            'open_meteo' => [
-                'display_name' => 'Open-Meteo Weather Hazards',
-                'endpoint_url' => 'https://api.open-meteo.com/v1/forecast?latitude=13.41&longitude=121.18&current=temperature_2m,precipitation,rain,weather_code,wind_speed_10m,wind_gusts_10m&daily=precipitation_sum,wind_speed_10m_max&timezone=Asia%2FManila',
-                'category' => 'Weather',
-                'auth_header_type' => 'none',
-                'auth_header_name' => null,
-            ],
             'brevo' => [
                 'display_name' => 'Brevo Email API',
                 'endpoint_url' => 'https://api.brevo.com/v3/smtp/email',
@@ -82,7 +75,7 @@ class ExternalHazardService
     public function getResidentFeed(): array
     {
         $this->ensureSystemApiRows();
-        foreach (['usgs', 'gdacs', 'typhoon', 'open_meteo'] as $key) {
+        foreach (['usgs', 'gdacs', 'typhoon'] as $key) {
             if (!$this->isProviderEnabled($key) || !$this->isSyncDue($key)) {
                 continue;
             }
@@ -96,7 +89,6 @@ class ExternalHazardService
         $allEvents = array_values(array_filter($this->getCachedHazardEvents(), function ($event) {
             $source = strtoupper((string) ($event['source'] ?? ''));
             if ($source === 'USGS') return $this->isProviderEnabled('usgs');
-            if ($source === 'OPEN_METEO') return $this->isProviderEnabled('open_meteo');
             if ($source === 'GDACS') {
                 return $this->isTyphoonHazardType((string) ($event['hazard_type'] ?? ''))
                     ? $this->isProviderEnabled('typhoon')
@@ -134,9 +126,6 @@ class ExternalHazardService
                     return strtoupper((string) ($event['source'] ?? '')) === 'GDACS'
                         && self::isTyphoonHazardType((string) ($event['hazard_type'] ?? ''));
                 })),
-                'open_meteo' => count(array_filter($allEvents, static function ($event) {
-                    return strtoupper((string) ($event['source'] ?? '')) === 'OPEN_METEO';
-                })),
             ],
             'layers' => [
                 'usgs' => [
@@ -151,13 +140,6 @@ class ExternalHazardService
                     'label' => 'GDACS Regional Alerts',
                     'count' => count(array_filter($allEvents, static function ($event) {
                         return strtoupper((string) ($event['source'] ?? '')) === 'GDACS';
-                    })),
-                ],
-                'open_meteo' => [
-                    'enabled' => $this->isProviderEnabled('open_meteo'),
-                    'label' => 'Open-Meteo Calapan Weather',
-                    'count' => count(array_filter($allEvents, static function ($event) {
-                        return strtoupper((string) ($event['source'] ?? '')) === 'OPEN_METEO';
                     })),
                 ],
                 'typhoon' => [
@@ -258,9 +240,6 @@ class ExternalHazardService
                 'event_url' => $this->cachedEventUrl($properties),
                 'is_published_to_residents' => (int) $row['is_published_to_residents'],
                 'raw_payload' => $rawPayload,
-                'weather_details' => is_array($rawPayload['weather_details'] ?? null)
-                    ? $rawPayload['weather_details']
-                    : null,
             ];
             $events[] = $event;
         }
@@ -277,7 +256,7 @@ class ExternalHazardService
         $statusByKey = [];
         foreach ($rows as $row) {
             $key = (string) $row['api_key'];
-            if (!in_array($key, ['usgs', 'gdacs', 'typhoon', 'open_meteo'], true)) {
+            if (!in_array($key, ['usgs', 'gdacs', 'typhoon'], true)) {
                 continue;
             }
             $enabled = $this->isProviderEnabled($key);
@@ -292,7 +271,6 @@ class ExternalHazardService
             $sourceEvents = array_values(array_filter($events, static function ($event) use ($key) {
                 $source = strtoupper((string) ($event['source'] ?? ''));
                 if ($key === 'usgs') return $source === 'USGS';
-                if ($key === 'open_meteo') return $source === 'OPEN_METEO';
                 if ($key === 'gdacs' || $key === 'typhoon') return $source === 'GDACS';
                 return false;
             }));
@@ -317,7 +295,7 @@ class ExternalHazardService
             ];
         }
 
-        foreach (['usgs', 'gdacs', 'typhoon', 'open_meteo'] as $key) {
+        foreach (['usgs', 'gdacs', 'typhoon'] as $key) {
             if (isset($statusByKey[$key])) {
                 continue;
             }
@@ -356,8 +334,6 @@ class ExternalHazardService
             }
             if ($source === 'USGS') {
                 $key = 'usgs';
-            } elseif ($source === 'OPEN_METEO') {
-                $key = 'open_meteo';
             } elseif ($source === 'GDACS') {
                 $key = self::isTyphoonHazardType($hazardType) ? 'typhoon' : 'gdacs';
             } else {
@@ -387,9 +363,7 @@ class ExternalHazardService
         if (!is_int($timestamp) || $timestamp === false) {
             return false;
         }
-        $days = $source === 'USGS'
-            ? 14
-            : ($source === 'GDACS' ? 30 : ($source === 'OPEN_METEO' ? 2 : 60));
+        $days = $source === 'USGS' ? 14 : ($source === 'GDACS' ? 30 : 60);
         if ($timestamp < time() - $days * 86400) {
             return false;
         }
@@ -787,7 +761,7 @@ class ExternalHazardService
         }
 
         try {
-            if (in_array($normalized, ['usgs', 'gdacs', 'typhoon', 'open_meteo'], true)) {
+            if (in_array($normalized, ['usgs', 'gdacs', 'typhoon'], true)) {
                 $events = $this->fetchProviderEvents($normalized);
                 if ($normalized === 'gdacs' || $normalized === 'typhoon') {
                     try {
@@ -928,10 +902,6 @@ class ExternalHazardService
         if ($key === 'gdacs' || $key === 'typhoon') {
             return $this->fetchGdacsEvents($key);
         }
-        if ($key === 'open_meteo') {
-            return $this->fetchOpenMeteoEvents();
-        }
-
         throw new InvalidArgumentException('Unsupported hazard feed: ' . $key);
     }
 
@@ -1117,122 +1087,6 @@ class ExternalHazardService
         return $events;
     }
 
-    private function fetchOpenMeteoEvents(): array
-    {
-        $response = $this->requestConfiguredProvider('open_meteo', []);
-        if (!is_string($response['body'])) {
-            throw new RuntimeException($response['error'] ?: 'Open-Meteo could not be reached.');
-        }
-
-        $decoded = json_decode($response['body'], true);
-        $current = is_array($decoded['current'] ?? null) ? $decoded['current'] : null;
-        $daily = is_array($decoded['daily'] ?? null) ? $decoded['daily'] : null;
-        if (!is_array($current) || !is_array($daily)) {
-            throw new RuntimeException('Open-Meteo returned an invalid forecast response.');
-        }
-        foreach (['temperature_2m', 'precipitation', 'rain', 'wind_speed_10m', 'wind_gusts_10m'] as $field) {
-            if (!isset($current[$field]) || !is_numeric($current[$field])) {
-                throw new RuntimeException('Open-Meteo response is missing current weather measurements.');
-            }
-        }
-        if (!is_string($current['time'] ?? null) || trim($current['time']) === '') {
-            throw new RuntimeException('Open-Meteo response is missing the current observation time.');
-        }
-
-        $currentPrecipitation = max((float) $current['precipitation'], (float) $current['rain']);
-        $dailyPrecipitationValues = array_filter(
-            is_array($daily['precipitation_sum'] ?? null) ? $daily['precipitation_sum'] : [],
-            'is_numeric'
-        );
-        $forecastPrecipitation = $dailyPrecipitationValues
-            ? max(array_map('floatval', $dailyPrecipitationValues))
-            : 0.0;
-        $precipitation = max($currentPrecipitation, $forecastPrecipitation);
-        $windSpeed = (float) $current['wind_speed_10m'];
-        $windGust = (float) $current['wind_gusts_10m'];
-        $dailyWindValues = array_filter(
-            is_array($daily['wind_speed_10m_max'] ?? null) ? $daily['wind_speed_10m_max'] : [],
-            'is_numeric'
-        );
-        $forecastWindSpeed = $dailyWindValues ? max(array_map('floatval', $dailyWindValues)) : null;
-        $hasHeavyRain = $precipitation > 10;
-        $hasStrongWind = $windGust > 50;
-        $isSevere = $precipitation > 25 || $windGust > 75;
-        try {
-            $localTime = new DateTimeImmutable($current['time'], new DateTimeZone('Asia/Manila'));
-        } catch (Exception $exception) {
-            throw new RuntimeException('Open-Meteo returned an invalid observation time.', 0, $exception);
-        }
-        $eventTime = $localTime->setTimezone(new DateTimeZone('UTC'));
-        $localDate = $localTime->format('Y-m-d');
-        $weatherDetails = [
-            'temperature_c' => (float) $current['temperature_2m'],
-            'current_precipitation_mm' => $currentPrecipitation,
-            'forecast_max_precipitation_mm' => $forecastPrecipitation,
-            'precipitation_mm' => $precipitation,
-            'wind_speed_kmh' => $windSpeed,
-            'wind_gust_kmh' => $windGust,
-            'forecast_max_wind_speed_kmh' => $forecastWindSpeed,
-            'weather_code' => $current['weather_code'] ?? null,
-            'status' => ($hasHeavyRain || $hasStrongWind) ? 'advisory' : 'normal',
-        ];
-        if ($hasHeavyRain) {
-            $title = $hasStrongWind
-                ? 'Heavy rain and strong wind advisory for Calapan City'
-                : 'Heavy rainfall advisory for Calapan City';
-            $hazardType = $hasStrongWind ? 'severe-weather' : 'rainfall';
-            $alertLevel = $isSevere ? 'RED' : 'ORANGE';
-        } elseif ($hasStrongWind) {
-            $title = 'Strong wind advisory for Calapan City';
-            $hazardType = 'wind';
-            $alertLevel = $isSevere ? 'RED' : 'ORANGE';
-        } else {
-            $title = 'Calapan City weather: normal conditions';
-            $hazardType = 'weather';
-            $alertLevel = 'NORMAL';
-        }
-
-        $events = [[
-            'id' => 'open-meteo-calapan-' . $localDate,
-            'source' => 'OPEN_METEO',
-            'hazard_type' => $hazardType,
-            'title' => $title,
-            'severity_level' => $alertLevel === 'RED'
-                ? 'red'
-                : ($alertLevel === 'ORANGE' ? 'orange' : 'green'),
-            'magnitude_or_score' => $precipitation,
-            'depth_km' => null,
-            'latitude' => 13.41,
-            'longitude' => 121.18,
-            'distance_to_municipality_km' => 0,
-            'affected_population' => null,
-            'event_timestamp' => $eventTime->format('c'),
-            'alert_level' => $alertLevel,
-            'is_philippines_event' => true,
-            'affected_area' => 'Calapan City, Oriental Mindoro',
-            'event_url' => null,
-            'is_published_to_residents' => 1,
-            'raw_payload' => [
-                'properties' => [
-                    'country' => 'Philippines',
-                    'location' => ['name' => 'Calapan City, Oriental Mindoro'],
-                    'alertlevel' => $alertLevel,
-                    'description' => $alertLevel === 'NORMAL'
-                        ? 'Current conditions are below the rainfall and wind-gust advisory thresholds.'
-                        : 'Rainfall or wind gusts exceed the configured severe-weather advisory threshold.',
-                ],
-                'weather_details' => $weatherDetails,
-                'response' => $decoded,
-            ],
-        ]];
-
-        $this->lastDiagnostics['open_meteo'] = [
-            'records_fetched' => 1,
-            'records_matched_region' => 1,
-        ];
-        return $events;
-    }
-
     private function httpRequest(
         string $url,
         array $headers = [],
@@ -1273,64 +1127,17 @@ class ExternalHazardService
             return;
         }
         $this->legacyProviderMigrationApplied = true;
-        $openMeteo = $this->providerCatalog()['open_meteo'];
-        $legacyExternal = $this->db->raw(
-            'SELECT is_enabled FROM external_api_configs WHERE api_key = ? LIMIT 1',
-            ['nasa_eonet']
-        )->fetch(PDO::FETCH_ASSOC);
-        if ($legacyExternal) {
-            $this->db->raw(
-                'INSERT IGNORE INTO external_api_configs ' .
-                '(api_key, display_name, endpoint_url, is_enabled, last_status, created_at, updated_at) ' .
-                'VALUES (?, ?, ?, ?, ?, NOW(), NOW())',
-                ['open_meteo', $openMeteo['display_name'], $openMeteo['endpoint_url'], 1, 'idle']
-            );
-        }
-
-        $legacySystem = $this->db->raw(
-            'SELECT id FROM system_apis WHERE api_key = ? LIMIT 1',
-            ['nasa_eonet']
-        )->fetch(PDO::FETCH_ASSOC);
-        $openMeteoSystem = $this->db->raw(
-            'SELECT id FROM system_apis WHERE api_key = ? LIMIT 1',
-            ['open_meteo']
-        )->fetch(PDO::FETCH_ASSOC);
-        if ($legacySystem && !$openMeteoSystem) {
-            $this->db->raw(
-                'UPDATE system_apis SET api_key = ?, api_name = ?, category = ?, endpoint_url = ?, ' .
-                'credential_encrypted = NULL, auth_header_type = ?, auth_header_name = NULL, ' .
-                'custom_parameters_json = ?, is_enabled = 1, last_status = ?, last_http_status = NULL, last_latency_ms = NULL, ' .
-                'rate_limit_until = NULL, last_synced_at = NULL, last_error_message = NULL, updated_at = NOW() ' .
-                'WHERE id = ?',
-                ['open_meteo', $openMeteo['display_name'], $openMeteo['category'], $openMeteo['endpoint_url'], 'none', '{}', 'idle', $legacySystem['id']]
-            );
-        } elseif ($legacySystem) {
-            $this->db->raw('DELETE FROM system_apis WHERE id = ?', [$legacySystem['id']]);
-        }
-
         $this->db->raw(
-            'UPDATE external_api_configs SET last_synced_at = NULL, last_status = ?, last_error_message = NULL, ' .
-            'rate_limit_until = NULL, records_cached = 0, updated_at = NOW() ' .
-            'WHERE api_key = ? AND (rate_limit_until IS NOT NULL OR last_error_message LIKE ?)',
-            ['idle', 'open_meteo', '%Limit reached%']
+            'DELETE FROM external_api_configs WHERE api_key IN (?, ?, ?)',
+            ['nasa_eonet', 'reliefweb', 'open_meteo']
         );
         $this->db->raw(
-            'UPDATE system_apis SET last_synced_at = NULL, last_status = ?, last_http_status = NULL, ' .
-            'last_latency_ms = NULL, last_error_message = NULL, rate_limit_until = NULL, updated_at = NOW() ' .
-            'WHERE api_key = ? AND (rate_limit_until IS NOT NULL OR last_http_status = 429 OR last_error_message LIKE ?)',
-            ['idle', 'open_meteo', '%Limit reached%']
+            'DELETE FROM system_apis WHERE api_key IN (?, ?, ?)',
+            ['nasa_eonet', 'reliefweb', 'open_meteo']
         );
         $this->db->raw(
-            'DELETE FROM external_api_configs WHERE api_key IN (?, ?)',
-            ['nasa_eonet', 'reliefweb']
-        );
-        $this->db->raw(
-            'DELETE FROM system_apis WHERE api_key IN (?, ?)',
-            ['nasa_eonet', 'reliefweb']
-        );
-        $this->db->raw(
-            'DELETE FROM external_hazard_events WHERE source IN (?, ?)',
-            ['NASA_EONET', 'RELIEFWEB']
+            'DELETE FROM external_hazard_events WHERE source IN (?, ?, ?)',
+            ['NASA_EONET', 'RELIEFWEB', 'OPEN_METEO']
         );
 
         ExternalApiConfig::forget('nasa_eonet');
