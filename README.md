@@ -190,6 +190,16 @@ $database['main'] = array(
 The database username can be provided as `DB_USER` (the `.env.example` name) or
 `DB_USERNAME`; if both are set, `DB_USERNAME` takes precedence.
 
+For managed MySQL providers such as Aiven, set `DB_HOST`, `DB_PORT`, `DB_USER`,
+`DB_PASSWORD`, and `DB_NAME` to the values from the provider console. Download
+the provider CA certificate and make it available to the backend deployment as
+a file, then set `DB_SSL_CA` to that file's path. The backend enables TLS and
+verifies the server certificate when this setting is present. Keep the
+certificate on the backend only; do not commit it or put database credentials
+in frontend environment variables. On Render, add the Aiven CA certificate as a
+Secret File and set `DB_SSL_CA` to its mounted path (for example,
+`/etc/secrets/aiven-ca.pem`).
+
 ### Calapan weather forecast
 
 The resident and admin dashboards read current conditions and a three-day
@@ -215,8 +225,9 @@ notification report/advisory targets, stores rate-limit reset timestamps, and cr
 `system_apis` registry. The registry routes are under `/api/admin/system-apis`; they support
 listing, create/update, connection testing, cache/rate-limit reset, and deletion of custom entries.
 For a manual phpMyAdmin/MySQL alternative, select the BayanAlert database and run
-[`manual_migrations_004_008_009.sql`](./manual_migrations_004_008_009.sql) instead of applying
-those migrations separately. It creates the notifications table only if missing and can be re-run.
+[`manual_migrations_external_api_004_008_009_010.sql`](./manual_migrations_external_api_004_008_009_010.sql)
+instead of applying migrations `004`, `008`, `009`, and `010` separately. It is safe to re-run
+and expands `external_hazard_events.hazard_type` for the normalized USGS, GDACS, and Open-Meteo values.
 After importing the BayanAlert schema, run
 [`manual_migration_011_barangays_moderation_resolved.sql`](./manual_migration_011_barangays_moderation_resolved.sql)
 to seed the 62 Calapan barangays and approximate map centers, add report and barangay coordinates,
