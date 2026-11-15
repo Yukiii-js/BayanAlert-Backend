@@ -136,9 +136,27 @@ class Errors
 	 */
 	public function show_database_error($message, $sql = '', $bindings = [], $exception = null, $template = 'error_db')
 	{
+		error_log('Database operation failed: ' . $message);
 		http_response_code(500);
 		
 		if (config_item('environment') !== 'development') {
+			$request_path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+			$is_api_request = $request_path === '/api' || strpos((string) $request_path, '/api/') === 0;
+			if ($is_api_request) {
+				if (!headers_sent()) {
+					header('Content-Type: application/json; charset=utf-8');
+				}
+				echo json_encode([
+					'success' => false,
+					'error' => 'Database service is unavailable.',
+					'message' => 'Database service is unavailable.',
+				]);
+			} else {
+				if (!headers_sent()) {
+					header('Content-Type: text/plain; charset=utf-8');
+				}
+				echo 'Database service is unavailable.';
+			}
 			exit();
 		}
 

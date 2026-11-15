@@ -186,17 +186,43 @@ if ( ! function_exists('_exception_handler'))
 	 */
 	function _exception_handler($e)
 	{
+		error_log(sprintf(
+			'Uncaught %s: %s in %s:%d',
+			get_class($e),
+			$e->getMessage(),
+			$e->getFile(),
+			$e->getLine()
+		));
+
 		if(config_item('log_threshold') == 1 || config_item('log_threshold') == 3)
 		{
 			$logger = load_class('logger', 'kernel');
 			$logger->log('error', get_class($e), $e->getMessage(), $e->getFile(), $e->getLine());
 		}
-		if(strtolower(config_item('environment') == 'development'))
+		if (strtolower((string) config_item('environment')) === 'development')
 		{
 			$exception = load_class('Errors', 'kernel');
 			$exception->show_exception($e);
 		}
-		
+
+		http_response_code(500);
+		$request_path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+		if ($request_path === '/api' || strpos((string) $request_path, '/api/') === 0) {
+			if (!headers_sent()) {
+				header('Content-Type: application/json; charset=utf-8');
+			}
+			echo json_encode([
+				'success' => false,
+				'error' => 'An unexpected server error occurred.',
+				'message' => 'An unexpected server error occurred.',
+			]);
+			return;
+		}
+
+		if (!headers_sent()) {
+			header('Content-Type: text/plain; charset=utf-8');
+		}
+		echo 'An unexpected server error occurred.';
 	}
 }
 
