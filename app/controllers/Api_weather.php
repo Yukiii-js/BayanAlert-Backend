@@ -1,6 +1,8 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
+require_once APP_DIR . 'libraries' . DIRECTORY_SEPARATOR . 'ExternalApiConfig.php';
+
 class Api_weather extends Controller
 {
     private const CALAPAN_QUERY = '13.411,121.18';
@@ -12,6 +14,11 @@ class Api_weather extends Controller
 
     public function calapan()
     {
+        if (!ExternalApiConfig::isEnabled($this->db, 'weatherapi')) {
+            api_error('Weather forecast is disabled by an administrator.', 503);
+            return;
+        }
+
         $apiKey = trim((string) getenv('WEATHERAPI_KEY'));
         if ($apiKey === '') {
             api_error('Weather forecast is not configured. Set WEATHERAPI_KEY in the backend environment.', 503);

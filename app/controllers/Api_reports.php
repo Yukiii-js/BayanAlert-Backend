@@ -223,6 +223,7 @@ class Api_reports extends Controller
             ->order_by('hazard_reports.submitted_at', 'DESC')
             ->get_all();
 
+            $this->attachAdminRemarks($reports);
             foreach ($reports as &$report) {
                 $report['evidence'] = $this->db->table('report_evidence')
                     ->select('evidence_id, report_id, file_path, evidence_type, description, uploaded_at')
@@ -236,6 +237,64 @@ class Api_reports extends Controller
             error_log('Reports index error: ' . $e->getMessage());
             api_error('Unable to load reports.', 500);
         }
+    }
+
+    private function attachAdminRemarks(array &$reports)
+    {
+        if (!$reports) {
+            return;
+        }
+
+        if (!$this->db->raw("SHOW TABLES LIKE 'report_verifications'")->fetch(PDO::FETCH_NUM)) {
+            return;
+        }
+        $columns = $this->db->raw('SHOW COLUMNS FROM `report_verifications`')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        $columnNames = array_map(static function ($column) {
+            return $column['Field'] ?? '';
+        }, $columns);
+        $remarksColumn = null;
+        foreach (['admin_remarks', 'verification_remarks', 'remarks', 'notes'] as $candidate) {
+            if (in_array($candidate, $columnNames, true)) {
+                $remarksColumn = $candidate;
+                break;
+            }
+        }
+
+        foreach ($reports as &$report) {
+            $report['admin_remarks'] = null;
+        }
+        unset($report);
+
+        if ($remarksColumn === null) {
+            return;
+        }
+
+        $reportIds = array_values(array_filter(array_map(static function ($report) {
+            return (int) ($report['report_id'] ?? 0);
+        }, $reports)));
+        if (!$reportIds) {
+            return;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
+        $remarks = $this->db->raw(
+            'SELECT rv.report_id, rv.`' . $remarksColumn . '` AS admin_remarks ' .
+            'FROM report_verifications rv INNER JOIN (' .
+            'SELECT report_id, MAX(verification_id) AS verification_id ' .
+            'FROM report_verifications WHERE report_id IN (' . $placeholders . ') GROUP BY report_id' .
+            ') latest ON latest.verification_id = rv.verification_id',
+            $reportIds
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $remarksByReport = [];
+        foreach ($remarks as $item) {
+            $remarksByReport[(int) $item['report_id']] = $item['admin_remarks'];
+        }
+
+        foreach ($reports as &$report) {
+            $report['admin_remarks'] = $remarksByReport[(int) $report['report_id']] ?? null;
+        }
+        unset($report);
     }
 
     public function community()

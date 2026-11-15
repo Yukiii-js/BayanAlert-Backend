@@ -1,6 +1,8 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
+require_once __DIR__ . DIRECTORY_SEPARATOR . 'ExternalApiConfig.php';
+
 class BrevoMailer
 {
     private const API_URL = 'https://api.brevo.com/v3/smtp/email';
@@ -29,6 +31,12 @@ class BrevoMailer
      */
     public function sendEmail($recipientEmail, $recipientName, $subject, $htmlContent, $textContent = '')
     {
+        $lava = lava_instance();
+        if (!ExternalApiConfig::isEnabled($lava->db, 'brevo')) {
+            error_log('Brevo email was not sent: the integration is disabled in API Management.');
+            return ['success' => false, 'error' => 'Transactional email is disabled by an administrator.'];
+        }
+
         $apiKey = trim((string) getenv('BREVO_API_KEY'));
         $senderEmail = trim((string) getenv('BREVO_SENDER_EMAIL'));
         $senderName = trim((string) getenv('BREVO_SENDER_NAME'));

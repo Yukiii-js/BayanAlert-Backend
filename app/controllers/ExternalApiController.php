@@ -15,7 +15,14 @@ class ExternalApiController extends Controller
     {
         try {
             $service = new ExternalHazardService();
-            api_response($service->getResidentFeed());
+            $feed = $service->getResidentFeed();
+            try {
+                $service->publishHighSeverityNotifications($feed['events']);
+            } catch (Throwable $notificationError) {
+                error_log('External hazard notification sync failed: ' . $notificationError->getMessage());
+                $feed['warnings'] = ['External advisory notifications could not be saved.'];
+            }
+            api_response($feed);
         } catch (Throwable $exception) {
             error_log('External resident feed failed: ' . $exception->getMessage());
             api_error('Unable to load the external hazard feed.', 500);
@@ -34,7 +41,7 @@ class ExternalApiController extends Controller
             api_response($service->getAdminSummary());
         } catch (Throwable $exception) {
             error_log('External admin APIs failed: ' . $exception->getMessage());
-            api_error('Unable to load external API status.', 500);
+            api_error('Unable to load external API status. Confirm migration 008 has been applied.', 503);
         }
     }
 
@@ -50,6 +57,9 @@ class ExternalApiController extends Controller
             api_response($service->sync($key), 200, 'External API sync completed');
         } catch (InvalidArgumentException $exception) {
             api_error($exception->getMessage(), 400);
+        } catch (RuntimeException $exception) {
+            error_log('External API connection test failed: ' . $exception->getMessage());
+            api_error($exception->getMessage(), 502);
         } catch (Throwable $exception) {
             error_log('External API sync failed: ' . $exception->getMessage());
             api_error('Unable to sync this external API.', 500);
@@ -67,6 +77,8 @@ class ExternalApiController extends Controller
             $service = new ExternalHazardService();
             $payload = get_request_input();
             api_response($service->updateConfig($key, is_array($payload) ? $payload : []), 200, 'External API configuration updated');
+        } catch (InvalidArgumentException $exception) {
+            api_error($exception->getMessage(), 400);
         } catch (Throwable $exception) {
             error_log('External API config update failed: ' . $exception->getMessage());
             api_error('Unable to update external API configuration.', 500);

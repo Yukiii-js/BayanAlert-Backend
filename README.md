@@ -208,7 +208,16 @@ at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, a
 `PATCH /api/admin/external-apis/{key}/config` allow health checks, manual sync triggers,
 and configuration updates without exposing the provider keys to the browser. The related
 migration `app/migrations/008_create_external_api_tables.php` creates the supporting tables.
-USGS and GDACS are public feeds and do not require API keys. For production, set
+Apply that migration before using API Management or persisting external advisory notifications.
+Connection tests are run on demand. WeatherAPI and Brevo tests require `WEATHERAPI_KEY` and
+`BREVO_API_KEY` respectively; their keys remain on the backend. USGS and GDACS are public feeds
+and do not require API keys. The Leaflet map uses the clipped, WGS84 GeoJSON at
+`BayanAlert-Frontend/public/data/calapan_barangays.geojson`, sourced from UN OCHA HDX's
+`cod-ab-phl` admin4 GeoJSON entry (`phl_admin4.geojson`, resource
+`0120c30e-ba8b-487d-83f5-a664eddd3a8e`). The full national archive is nearly 1 GB; only the
+Calapan City features are bundled and served by the frontend, so neither the browser nor Render
+downloads the national archive. Preserve UN OCHA HDX attribution when updating this subset.
+For production, set
 `APP_ENV=production` and set a random `APP_KEY` in the backend host's environment;
 the key is required for CSRF protection and must not be committed. Generate one
 with `php -r "echo bin2hex(random_bytes(32));"`. When the frontend is hosted

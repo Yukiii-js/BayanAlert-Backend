@@ -576,7 +576,7 @@ class Admin_model extends Model
                 continue;
             }
 
-            $value = is_string($value) ? trim($value) : '';
+            $value = is_scalar($value) ? trim((string) $value) : '';
             if ($value === '') {
                 if (!$field['nullable'] && $field['default'] === null) {
                     return ['data' => [], 'error' => $field['label'] . ' is required.'];
