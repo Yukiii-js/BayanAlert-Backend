@@ -15,6 +15,7 @@ class ExternalHazardService
     private $lastRetryAfterAt;
     private $lastHttpStatus;
     private $lastLatencyMs;
+    private $lastDiagnostics = [];
 
     public function __construct()
     {
@@ -61,8 +62,15 @@ class ExternalHazardService
                 'auth_header_name' => null,
             ],
             'nasa_eonet' => [
-                'display_name' => 'NASA EONET / Open-Meteo',
+                'display_name' => 'NASA EONET',
                 'endpoint_url' => 'https://eonet.gsfc.nasa.gov/api/v3/events',
+                'category' => 'Hazard',
+                'auth_header_type' => 'none',
+                'auth_header_name' => null,
+            ],
+            'reliefweb' => [
+                'display_name' => 'ReliefWeb Disasters API',
+                'endpoint_url' => 'https://api.reliefweb.int/v1/disasters',
                 'category' => 'Hazard',
                 'auth_header_type' => 'none',
                 'auth_header_name' => null,
@@ -79,43 +87,30 @@ class ExternalHazardService
 
     public function getResidentFeed(): array
     {
-        $usgsEvents = $this->fetchUsgsEvents();
-        $gdacsEnabled = $this->isProviderEnabled('gdacs');
-        $typhoonEnabled = $this->isProviderEnabled('typhoon');
-        $gdacsEvents = array_values(array_filter(
-            $this->fetchGdacsEvents(),
-            static function ($event) use ($gdacsEnabled, $typhoonEnabled) {
-                $isTyphoon = strtoupper((string) ($event['hazard_type'] ?? '')) === 'TC';
-                return $isTyphoon ? $typhoonEnabled : $gdacsEnabled;
+        $this->ensureSystemApiRows();
+        foreach (['usgs', 'gdacs', 'typhoon', 'reliefweb'] as $key) {
+            if (!$this->isProviderEnabled($key) || !$this->isSyncDue($key)) {
+                continue;
             }
-        ));
-        $typhoonEvents = array_values(array_filter($gdacsEvents, static function ($event) {
-            return strtoupper((string) ($event['hazard_type'] ?? '')) === 'TC';
-        }));
-        $gdacsStatus = $this->providerStatus['gdacs'] ?? [
-            'status' => 'unknown',
-            'message' => 'GDACS feed status is unavailable.',
-        ];
-        $this->providerStatus['gdacs'] = $gdacsEnabled
-            ? $gdacsStatus
-            : ['status' => 'disabled', 'message' => null];
-        $this->providerStatus['typhoon'] = $typhoonEnabled
-            ? $gdacsStatus
-            : ['status' => 'disabled', 'message' => null];
-        $nasaStatus = $this->db->raw(
-            'SELECT last_status, rate_limit_until FROM system_apis WHERE api_key = ? LIMIT 1',
-            ['nasa_eonet']
-        )->fetch(PDO::FETCH_ASSOC);
-        if ($nasaStatus) {
-            $this->providerStatus['nasa_eonet'] = [
-                'status' => (string) $nasaStatus['last_status'],
-                'message' => 'error' === $nasaStatus['last_status'] && !empty($nasaStatus['rate_limit_until'])
-                    ? 'Limit reached'
-                    : null,
-                'rate_limit_until' => $nasaStatus['rate_limit_until'],
-            ];
+            try {
+                $this->sync($key);
+            } catch (Throwable $exception) {
+                error_log('Scheduled external hazard sync failed for ' . $key . ': ' . $exception->getMessage());
+            }
         }
-        $allEvents = array_merge($usgsEvents, $gdacsEvents);
+
+        $allEvents = array_values(array_filter($this->getCachedHazardEvents(), function ($event) {
+            $source = strtoupper((string) ($event['source'] ?? ''));
+            if ($source === 'USGS') return $this->isProviderEnabled('usgs');
+            if ($source === 'RELIEFWEB') return $this->isProviderEnabled('reliefweb');
+            if ($source === 'GDACS') {
+                return strtoupper((string) ($event['hazard_type'] ?? '')) === 'TC'
+                    ? $this->isProviderEnabled('typhoon')
+                    : $this->isProviderEnabled('gdacs');
+            }
+            return false;
+        }));
+        $providerStatus = $this->getResidentProviderStatuses($allEvents);
 
         usort($allEvents, static function ($left, $right) {
             $leftTime = strtotime((string) ($left['event_timestamp'] ?? '1970-01-01T00:00:00Z'));
@@ -125,23 +120,45 @@ class ExternalHazardService
 
         return [
             'generated_at' => gmdate('c'),
-            'providers' => $this->providerStatus,
+            'providers' => $providerStatus,
             'summary' => [
                 'total' => count($allEvents),
-                'usgs' => count($usgsEvents),
-                'gdacs' => count($gdacsEvents),
-                'typhoon' => count($typhoonEvents),
+                'usgs' => count(array_filter($allEvents, static function ($event) {
+                    return strtoupper((string) ($event['source'] ?? '')) === 'USGS';
+                })),
+                'gdacs' => count(array_filter($allEvents, static function ($event) {
+                    return strtoupper((string) ($event['source'] ?? '')) === 'GDACS'
+                        && strtoupper((string) ($event['hazard_type'] ?? '')) !== 'TC';
+                })),
+                'typhoon' => count(array_filter($allEvents, static function ($event) {
+                    return strtoupper((string) ($event['source'] ?? '')) === 'GDACS'
+                        && strtoupper((string) ($event['hazard_type'] ?? '')) === 'TC';
+                })),
+                'reliefweb' => count(array_filter($allEvents, static function ($event) {
+                    return strtoupper((string) ($event['source'] ?? '')) === 'RELIEFWEB';
+                })),
             ],
             'layers' => [
                 'usgs' => [
                     'enabled' => $this->isProviderEnabled('usgs'),
                     'label' => 'USGS Seismic Epicenters',
-                    'count' => count($usgsEvents),
+                    'count' => count(array_filter($allEvents, static function ($event) {
+                        return strtoupper((string) ($event['source'] ?? '')) === 'USGS';
+                    })),
                 ],
                 'gdacs' => [
-                    'enabled' => $gdacsEnabled,
+                    'enabled' => $this->isProviderEnabled('gdacs'),
                     'label' => 'GDACS Regional Alerts',
-                    'count' => count($gdacsEvents),
+                    'count' => count(array_filter($allEvents, static function ($event) {
+                        return strtoupper((string) ($event['source'] ?? '')) === 'GDACS';
+                    })),
+                ],
+                'reliefweb' => [
+                    'enabled' => $this->isProviderEnabled('reliefweb'),
+                    'label' => 'ReliefWeb Philippines Disasters',
+                    'count' => count(array_filter($allEvents, static function ($event) {
+                        return strtoupper((string) ($event['source'] ?? '')) === 'RELIEFWEB';
+                    })),
                 ],
                 'hdx' => [
                     'enabled' => true,
@@ -152,6 +169,463 @@ class ExternalHazardService
             ],
             'events' => $allEvents,
         ];
+    }
+
+    private function isSyncDue(string $key): bool
+    {
+        $row = $this->db->raw(
+            'SELECT sync_interval_minutes, last_synced_at, rate_limit_until FROM system_apis WHERE api_key = ? LIMIT 1',
+            [$key]
+        )->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return true;
+        }
+
+        $rateLimitUntil = !empty($row['rate_limit_until']) ? strtotime((string) $row['rate_limit_until']) : false;
+        if ($rateLimitUntil !== false && $rateLimitUntil > time()) {
+            return false;
+        }
+        if (empty($row['last_synced_at'])) {
+            return true;
+        }
+
+        $lastSynced = strtotime((string) $row['last_synced_at']);
+        $interval = max(1, (int) ($row['sync_interval_minutes'] ?? 60));
+        return $lastSynced === false || $lastSynced + $interval * 60 <= time();
+    }
+
+    private function getCachedHazardEvents(): array
+    {
+        $rows = $this->db->raw(
+            'SELECT id, source, external_event_id, hazard_type, title, severity_level, magnitude_or_score, depth_km, ' .
+            'latitude, longitude, distance_to_municipality_km, affected_population, event_timestamp, raw_payload_json, ' .
+            'is_published_to_residents FROM external_hazard_events ' .
+            'WHERE event_timestamp >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 60 DAY)'
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $events = [];
+        foreach ($rows as $row) {
+            $rawPayload = json_decode((string) ($row['raw_payload_json'] ?? ''), true);
+            $rawPayload = is_array($rawPayload) ? $rawPayload : [];
+            $properties = is_array($rawPayload['properties'] ?? null)
+                ? $rawPayload['properties']
+                : (is_array($rawPayload['fields'] ?? null) ? $rawPayload['fields'] : []);
+            $eventTimestamp = strtotime((string) $row['event_timestamp']);
+            $source = strtoupper((string) $row['source']);
+            $hazardType = strtoupper((string) $row['hazard_type']);
+            if (!$this->isStoredEventRecent($source, $hazardType, $eventTimestamp, $properties)) {
+                continue;
+            }
+            $latitude = $row['latitude'] === null ? null : (float) $row['latitude'];
+            $longitude = $row['longitude'] === null ? null : (float) $row['longitude'];
+            $distance = $row['distance_to_municipality_km'] === null
+                ? (($latitude !== null && $longitude !== null)
+                    ? self::haversineKm($latitude, $longitude, self::DEFAULT_CENTER_LAT, self::DEFAULT_CENTER_LON)
+                    : null)
+                : (float) $row['distance_to_municipality_km'];
+            $alert = strtoupper((string) ($properties['alertlevel'] ?? $properties['alert'] ?? ''));
+            if ($alert === '') {
+                $alert = $source === 'RELIEFWEB'
+                    ? 'INFORMATION'
+                    : strtoupper((string) ($row['severity_level'] ?? 'GREEN'));
+            }
+            $area = $this->affectedArea($properties) ?? $this->cachedArea($properties);
+            $event = [
+                'id' => (string) $row['external_event_id'],
+                'advisory_id' => (string) $row['external_event_id'],
+                'source' => (string) $row['source'],
+                'hazard_type' => (string) $row['hazard_type'],
+                'title' => (string) $row['title'],
+                'severity_level' => (string) ($row['severity_level'] ?? 'green'),
+                'magnitude_or_score' => $row['magnitude_or_score'] === null ? null : (float) $row['magnitude_or_score'],
+                'depth_km' => $row['depth_km'] === null ? null : (float) $row['depth_km'],
+                'latitude' => $latitude,
+                'longitude' => $longitude,
+                'distance_to_municipality_km' => $distance === null ? null : round($distance, 2),
+                'affected_population' => $row['affected_population'] === null ? null : (int) $row['affected_population'],
+                'event_timestamp' => gmdate('c', $eventTimestamp),
+                'alert_level' => $alert,
+                'is_philippines_event' => $this->isPhilippinesEvent($properties, $latitude, $longitude),
+                'affected_area' => $area,
+                'event_url' => $this->cachedEventUrl($properties),
+                'is_published_to_residents' => (int) $row['is_published_to_residents'],
+                'raw_payload' => $rawPayload,
+            ];
+            $events[] = $event;
+        }
+
+        return $events;
+    }
+
+    private function getResidentProviderStatuses(array $events): array
+    {
+        $rows = $this->db->raw(
+            'SELECT api_key, last_status, last_http_status, last_latency_ms, rate_limit_until, last_synced_at, last_error_message ' .
+            'FROM system_apis'
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $statusByKey = [];
+        foreach ($rows as $row) {
+            $key = (string) $row['api_key'];
+            if (!in_array($key, ['usgs', 'gdacs', 'typhoon', 'reliefweb'], true)) {
+                continue;
+            }
+            $enabled = $this->isProviderEnabled($key);
+            $status = !$enabled ? 'disabled' : (string) ($row['last_status'] ?? 'idle');
+            $message = null;
+            if ($enabled && $status === 'error') {
+                $rateLimit = !empty($row['rate_limit_until']) ? strtotime((string) $row['rate_limit_until']) : false;
+                $message = $rateLimit !== false && $rateLimit > time()
+                    ? 'Limit reached'
+                    : 'This source is temporarily unavailable.';
+            }
+            $sourceEvents = array_values(array_filter($events, static function ($event) use ($key) {
+                $source = strtoupper((string) ($event['source'] ?? ''));
+                if ($key === 'usgs') return $source === 'USGS';
+                if ($key === 'reliefweb') return $source === 'RELIEFWEB';
+                if ($key === 'gdacs' || $key === 'typhoon') return $source === 'GDACS';
+                return false;
+            }));
+            if ($key === 'typhoon') {
+                $sourceEvents = array_values(array_filter($sourceEvents, static function ($event) {
+                    return strtoupper((string) ($event['hazard_type'] ?? '')) === 'TC';
+                }));
+            } elseif ($key === 'gdacs') {
+                $sourceEvents = array_values(array_filter($sourceEvents, static function ($event) {
+                    return strtoupper((string) ($event['hazard_type'] ?? '')) !== 'TC';
+                }));
+            }
+            $statusByKey[$key] = [
+                'status' => $status,
+                'message' => $message,
+                'last_synced_at' => $row['last_synced_at'],
+                'last_http_status' => $row['last_http_status'] === null ? null : (int) $row['last_http_status'],
+                'last_latency_ms' => $row['last_latency_ms'] === null ? null : (int) $row['last_latency_ms'],
+                'rate_limit_until' => $row['rate_limit_until'],
+                'records_fetched' => count($sourceEvents),
+                'records_matched_region' => $this->countRegionallyRelevant($sourceEvents),
+            ];
+        }
+
+        foreach (['usgs', 'gdacs', 'typhoon', 'reliefweb'] as $key) {
+            if (isset($statusByKey[$key])) {
+                continue;
+            }
+            $statusByKey[$key] = [
+                'status' => $this->isProviderEnabled($key) ? 'idle' : 'disabled',
+                'message' => null,
+                'last_synced_at' => null,
+                'last_http_status' => null,
+                'last_latency_ms' => null,
+                'rate_limit_until' => null,
+                'records_fetched' => 0,
+                'records_matched_region' => 0,
+            ];
+        }
+
+        return $statusByKey;
+    }
+
+    private function getCachedProviderCounts(): array
+    {
+        $rows = $this->db->raw(
+            'SELECT source, hazard_type, distance_to_municipality_km, event_timestamp, raw_payload_json ' .
+            'FROM external_hazard_events WHERE event_timestamp >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 60 DAY)'
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $counts = [];
+        foreach ($rows as $row) {
+            $source = strtoupper((string) $row['source']);
+            $hazardType = strtoupper((string) $row['hazard_type']);
+            $rawPayload = json_decode((string) ($row['raw_payload_json'] ?? ''), true);
+            $properties = is_array($rawPayload['properties'] ?? null)
+                ? $rawPayload['properties']
+                : (is_array($rawPayload['fields'] ?? null) ? $rawPayload['fields'] : []);
+            $timestamp = strtotime((string) $row['event_timestamp']);
+            if (!$this->isStoredEventRecent($source, $hazardType, $timestamp, $properties)) {
+                continue;
+            }
+            if ($source === 'USGS') {
+                $key = 'usgs';
+            } elseif ($source === 'RELIEFWEB') {
+                $key = 'reliefweb';
+            } elseif ($source === 'GDACS') {
+                $key = $hazardType === 'TC' ? 'typhoon' : 'gdacs';
+            } else {
+                continue;
+            }
+            if (!isset($counts[$key])) {
+                $counts[$key] = ['total' => 0, 'regional' => 0];
+            }
+            $counts[$key]['total']++;
+            $distance = $row['distance_to_municipality_km'] === null
+                ? null
+                : (float) $row['distance_to_municipality_km'];
+            $area = $this->affectedArea($properties) ?? $this->cachedArea($properties);
+            if ($this->isRegionallyRelevant([
+                'distance_to_municipality_km' => $distance,
+                'affected_area' => $area,
+            ])) {
+                $counts[$key]['regional']++;
+            }
+        }
+
+        return $counts;
+    }
+
+    private function isStoredEventRecent(string $source, string $hazardType, $timestamp, array $properties): bool
+    {
+        if (!is_int($timestamp) || $timestamp === false) {
+            return false;
+        }
+        $days = $source === 'USGS'
+            ? 7
+            : ($source === 'GDACS' && $hazardType === 'TC' ? 14 : ($source === 'GDACS' ? 30 : 60));
+        if ($timestamp < time() - $days * 86400) {
+            return false;
+        }
+        if ($source === 'GDACS') {
+            $endDate = strtotime((string) ($properties['todate'] ?? ''));
+            if ($endDate !== false && $endDate < strtotime('-2 days')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function saveCachedHazardEvents(array $events): void
+    {
+        if (!$events) {
+            return;
+        }
+
+        $this->db->raw('START TRANSACTION');
+        try {
+            foreach ($events as $event) {
+                $timestamp = strtotime((string) ($event['event_timestamp'] ?? ''));
+                $eventDate = $timestamp === false ? gmdate('Y-m-d H:i:s') : gmdate('Y-m-d H:i:s', $timestamp);
+                $externalId = $this->safeExternalId((string) ($event['id'] ?? uniqid('hazard', true)));
+                $rawJson = json_encode(
+                    $event['raw_payload'] ?? $event,
+                    JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
+                );
+                $this->db->raw(
+                    'INSERT INTO external_hazard_events ' .
+                    '(source, external_event_id, hazard_type, title, severity_level, magnitude_or_score, depth_km, latitude, longitude, ' .
+                    'distance_to_municipality_km, affected_population, event_timestamp, raw_payload_json, is_published_to_residents, created_at, updated_at) ' .
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW()) ' .
+                    'ON DUPLICATE KEY UPDATE source = VALUES(source), hazard_type = VALUES(hazard_type), title = VALUES(title), ' .
+                    'severity_level = VALUES(severity_level), magnitude_or_score = VALUES(magnitude_or_score), depth_km = VALUES(depth_km), ' .
+                    'latitude = VALUES(latitude), longitude = VALUES(longitude), distance_to_municipality_km = VALUES(distance_to_municipality_km), ' .
+                    'affected_population = VALUES(affected_population), event_timestamp = VALUES(event_timestamp), ' .
+                    'raw_payload_json = VALUES(raw_payload_json), updated_at = NOW()',
+                    [
+                        substr(strtoupper((string) ($event['source'] ?? 'UNKNOWN')), 0, 16),
+                        substr($externalId, 0, 128),
+                        substr(strtoupper((string) ($event['hazard_type'] ?? 'ALERT')), 0, 8),
+                        substr((string) ($event['title'] ?? 'Hazard event'), 0, 255),
+                        substr(strtolower((string) ($event['severity_level'] ?? 'green')), 0, 16),
+                        isset($event['magnitude_or_score']) && is_numeric($event['magnitude_or_score'])
+                            ? (float) $event['magnitude_or_score']
+                            : null,
+                        isset($event['depth_km']) && is_numeric($event['depth_km']) ? (float) $event['depth_km'] : null,
+                        isset($event['latitude']) && is_numeric($event['latitude']) ? (float) $event['latitude'] : null,
+                        isset($event['longitude']) && is_numeric($event['longitude']) ? (float) $event['longitude'] : null,
+                        isset($event['distance_to_municipality_km']) && is_numeric($event['distance_to_municipality_km'])
+                            ? (float) $event['distance_to_municipality_km']
+                            : null,
+                        isset($event['affected_population']) && is_numeric($event['affected_population'])
+                            ? (int) $event['affected_population']
+                            : null,
+                        $eventDate,
+                        is_string($rawJson) ? $rawJson : '{}',
+                        !empty($event['is_published_to_residents']) ? 1 : 0,
+                    ]
+                );
+            }
+            $this->db->raw('COMMIT');
+        } catch (Throwable $exception) {
+            $this->db->raw('ROLLBACK');
+            throw $exception;
+        }
+    }
+
+    private function isPhilippinesCoordinate(?float $latitude, ?float $longitude): bool
+    {
+        return $latitude !== null && $longitude !== null
+            && $latitude >= 4.0 && $latitude <= 22.0
+            && $longitude >= 116.0 && $longitude <= 127.0;
+    }
+
+    private function isPhilippinesEvent(array $properties, ?float $latitude, ?float $longitude): bool
+    {
+        if ($this->isPhilippinesCoordinate($latitude, $longitude)) {
+            return true;
+        }
+        foreach (['iso3', 'country_iso3'] as $key) {
+            if (strtoupper((string) ($properties[$key] ?? '')) === 'PHL') {
+                return true;
+            }
+        }
+        foreach (['country', 'country_name', 'countryname'] as $key) {
+            $value = $properties[$key] ?? null;
+            if (is_string($value) && in_array(strtolower(trim($value)), ['philippines', 'phl'], true)) {
+                return true;
+            }
+            if (is_array($value)) {
+                foreach ($value as $country) {
+                    if (!is_array($country)) {
+                        if (strtolower(trim((string) $country)) === 'philippines') return true;
+                        continue;
+                    }
+                    if (strtoupper((string) ($country['iso3'] ?? $country['code'] ?? '')) === 'PHL'
+                        || strtolower(trim((string) ($country['name'] ?? $country['country'] ?? ''))) === 'philippines') {
+                        return true;
+                    }
+                }
+            }
+        }
+        $affectedCountries = $properties['affectedcountries'] ?? [];
+        if (is_array($affectedCountries)) {
+            foreach ($affectedCountries as $country) {
+                if (!is_array($country)) {
+                    if (strtolower(trim((string) $country)) === 'philippines') return true;
+                    continue;
+                }
+                if (strtoupper((string) ($country['iso3'] ?? '')) === 'PHL'
+                    || strtolower(trim((string) ($country['name'] ?? $country['country'] ?? ''))) === 'philippines') {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function isRegionallyRelevant(array $event): bool
+    {
+        $distance = $event['distance_to_municipality_km'] ?? null;
+        if (is_numeric($distance) && (float) $distance <= 150) {
+            return true;
+        }
+        $area = strtolower((string) ($event['affected_area'] ?? ''));
+        return strpos($area, 'oriental mindoro') !== false || strpos($area, 'calapan') !== false;
+    }
+
+    private function countRegionallyRelevant(array $events): int
+    {
+        $count = 0;
+        foreach ($events as $event) {
+            if ($this->isRegionallyRelevant($event)) {
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    private function extractReliefWebCoordinates(array $fields): array
+    {
+        $candidates = [];
+        $countries = is_array($fields['country'] ?? null) ? $fields['country'] : [];
+        if (isset($countries['location'])) {
+            $countries = [$countries];
+        }
+        foreach ($countries as $country) {
+            if (is_array($country)) {
+                if (isset($country['lat'], $country['lon'])) {
+                    $candidates[] = $country;
+                }
+                if (is_array($country['location'] ?? null)) {
+                    $candidates[] = $country['location'];
+                }
+            }
+        }
+        foreach (['location', 'primary_country'] as $key) {
+            if (is_array($fields[$key] ?? null)) {
+                $candidates[] = $fields[$key];
+            }
+        }
+        foreach ($candidates as $candidate) {
+            $latitude = $candidate['lat'] ?? $candidate['latitude'] ?? null;
+            $longitude = $candidate['lon'] ?? $candidate['longitude'] ?? null;
+            if (is_numeric($latitude) && is_numeric($longitude)) {
+                return ['latitude' => (float) $latitude, 'longitude' => (float) $longitude];
+            }
+            if (is_array($candidate['location'] ?? null)) {
+                $nested = $candidate['location'];
+                $latitude = $nested['lat'] ?? $nested['latitude'] ?? null;
+                $longitude = $nested['lon'] ?? $nested['longitude'] ?? null;
+                if (is_numeric($latitude) && is_numeric($longitude)) {
+                    return ['latitude' => (float) $latitude, 'longitude' => (float) $longitude];
+                }
+            }
+        }
+
+        return ['latitude' => null, 'longitude' => null];
+    }
+
+    private function reliefWebCountryNames(array $fields): array
+    {
+        $names = [];
+        $countries = is_array($fields['country'] ?? null) ? $fields['country'] : [];
+        if (isset($countries['name'])) {
+            $countries = [$countries];
+        }
+        foreach ($countries as $country) {
+            if (is_array($country)) {
+                $name = trim((string) ($country['name'] ?? ''));
+                if ($name !== '') $names[] = $name;
+            }
+        }
+        return array_values(array_unique($names));
+    }
+
+    private function safeExternalId(string $value): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9_-]+/', '-', $value);
+        $safe = trim((string) $safe, '-_');
+        return substr($safe !== '' ? $safe : uniqid('event', true), 0, 110);
+    }
+
+    private function cachedArea(array $properties): ?string
+    {
+        $countries = $properties['country'] ?? $properties['affectedcountries'] ?? [];
+        $names = [];
+        if (is_array($countries)) {
+            foreach ($countries as $country) {
+                if (is_array($country)) {
+                    $name = trim((string) ($country['name'] ?? $country['country'] ?? ''));
+                    if ($name !== '') $names[] = $name;
+                } elseif (is_string($country) && trim($country) !== '') {
+                    $names[] = trim($country);
+                }
+            }
+        }
+        $location = $properties['location'] ?? null;
+        if (is_array($location)) {
+            $locationName = $location['name'] ?? $location['name_en'] ?? null;
+            foreach (['admin1', 'admin2', 'country'] as $key) {
+                if ($locationName !== null) break;
+                $nested = $location[$key] ?? null;
+                $locationName = is_array($nested) ? ($nested['name'] ?? null) : $nested;
+            }
+            $location = $locationName;
+        }
+        if (is_string($location) && trim($location) !== '') {
+            $names[] = trim($location);
+        }
+        if (!$names) {
+            $name = trim((string) ($properties['name'] ?? ''));
+            if ($name !== '') $names[] = $name;
+        }
+        return $names ? implode(', ', array_unique($names)) : null;
+    }
+
+    private function cachedEventUrl(array $properties): ?string
+    {
+        $url = $properties['url'] ?? $properties['urlreport'] ?? null;
+        if (is_array($url)) {
+            $url = $url['report'] ?? $url['details'] ?? null;
+        }
+        return is_string($url) && preg_match('/^https?:\/\//i', $url) ? $url : null;
     }
 
     public function publishHighSeverityNotifications(array $events): int
@@ -253,6 +727,7 @@ class ExternalHazardService
             'last_http_status, last_latency_ms, rate_limit_until, last_synced_at, last_error_message ' .
             'FROM system_apis'
         )->fetchAll(PDO::FETCH_ASSOC);
+        $cachedProviderCounts = $this->getCachedProviderCounts();
         $systemByKey = [];
         foreach ($systemRows as $row) {
             $systemByKey[$row['api_key']] = $row;
@@ -290,6 +765,8 @@ class ExternalHazardService
                 'last_error_message' => $system['last_error_message'] ?? ($row['last_error_message'] ?? null),
                 'rate_limit_until' => $system['rate_limit_until'] ?? ($row['rate_limit_until'] ?? null),
                 'records_cached' => (int) ($row['records_cached'] ?? 0),
+                'records_fetched' => (int) ($row['records_cached'] ?? 0),
+                'records_matched_region' => (int) ($cachedProviderCounts[$key]['regional'] ?? 0),
                 'is_enabled' => $enabled,
             ];
         }
@@ -319,6 +796,8 @@ class ExternalHazardService
                 'last_error_message' => $system['last_error_message'],
                 'rate_limit_until' => $system['rate_limit_until'],
                 'records_cached' => 0,
+                'records_fetched' => 0,
+                'records_matched_region' => 0,
                 'is_enabled' => (int) $system['is_enabled'] === 1,
             ];
         }
@@ -340,13 +819,45 @@ class ExternalHazardService
         $this->lastRetryAfterAt = null;
         $this->lastHttpStatus = null;
         $this->lastLatencyMs = null;
+        $this->lastDiagnostics = [];
+        $lockName = 'bayanalert_external_sync_' . $normalized;
+        $lock = $this->db->raw('SELECT GET_LOCK(?, 0) AS acquired', [$lockName])
+            ->fetch(PDO::FETCH_ASSOC);
+        if ((int) ($lock['acquired'] ?? 0) !== 1) {
+            throw new RuntimeException('An external API sync is already in progress.');
+        }
+
         try {
-            $records = $this->testProvider($normalized);
-            $this->saveSyncStatus($normalized, 'online', null, $records);
+            if (in_array($normalized, ['usgs', 'gdacs', 'typhoon', 'reliefweb'], true)) {
+                $events = $this->fetchProviderEvents($normalized);
+                if ($normalized === 'gdacs' || $normalized === 'typhoon') {
+                    try {
+                        $this->publishHighSeverityNotifications($events);
+                    } catch (Throwable $notificationError) {
+                        error_log('External advisory notifications could not be saved: ' . $notificationError->getMessage());
+                    }
+                }
+                $this->saveCachedHazardEvents($events);
+                $records = count($events);
+                $this->lastDiagnostics[$normalized] = $this->lastDiagnostics[$normalized] ?? [
+                    'records_fetched' => $records,
+                    'records_matched_region' => $this->countRegionallyRelevant($events),
+                ];
+            } else {
+                $records = $this->testProvider($normalized);
+                $this->lastDiagnostics[$normalized] = [
+                    'records_fetched' => $records,
+                    'records_matched_region' => null,
+                ];
+            }
+            $diagnostics = $this->lastDiagnostics[$normalized];
+            $this->saveSyncStatus($normalized, 'online', null, $diagnostics['records_fetched']);
             return [
                 'api_key' => $normalized,
                 'status' => 'success',
                 'records_cached' => $records,
+                'records_fetched' => $diagnostics['records_fetched'],
+                'records_matched_region' => $diagnostics['records_matched_region'],
                 'last_synced_at' => gmdate('c'),
                 'http_status' => $this->lastHttpStatus,
                 'latency_ms' => $this->lastLatencyMs,
@@ -357,6 +868,8 @@ class ExternalHazardService
                 : $exception->getMessage();
             $this->saveSyncStatus($normalized, 'error', $message, 0);
             throw new RuntimeException($message, 0, $exception);
+        } finally {
+            $this->db->raw('SELECT RELEASE_LOCK(?)', [$lockName]);
         }
     }
 
@@ -448,165 +961,169 @@ class ExternalHazardService
         ];
     }
 
-    private function fetchUsgsEvents(): array
+    private function fetchProviderEvents(string $key): array
     {
-        if (!$this->isProviderEnabled('usgs')) {
-            $this->providerStatus['usgs'] = ['status' => 'disabled', 'message' => null];
-            return [];
+        if ($key === 'usgs') {
+            return $this->fetchUsgsEvents();
+        }
+        if ($key === 'gdacs' || $key === 'typhoon') {
+            return $this->fetchGdacsEvents($key);
+        }
+        if ($key === 'reliefweb') {
+            return $this->fetchReliefWebEvents();
         }
 
+        throw new InvalidArgumentException('Unsupported hazard feed: ' . $key);
+    }
+
+    private function fetchUsgsEvents(): array
+    {
         $settings = $this->systemApiSettings('usgs');
         $parameters = $settings['custom_parameters'] + [
             'format' => 'geojson',
-            'starttime' => date('Y-m-d', strtotime('-7 days')),
-            'latitude' => self::DEFAULT_CENTER_LAT,
-            'longitude' => self::DEFAULT_CENTER_LON,
-            'maxradiuskm' => 300,
+            'starttime' => gmdate('Y-m-d\TH:i:s\Z', time() - 7 * 86400),
             'minmagnitude' => 2.5,
+            'minlatitude' => 4.5,
+            'maxlatitude' => 21.5,
+            'minlongitude' => 116.0,
+            'maxlongitude' => 127.0,
         ];
         $response = $this->requestConfiguredProvider('usgs', $parameters);
-
         if (!is_string($response['body'])) {
-            $this->providerStatus['usgs'] = [
-                'status' => 'error',
-                'message' => $response['error'] === 'Limit reached' ? 'Limit reached' : 'USGS could not be reached.',
-                'rate_limit_until' => $response['retry_after_at'],
-            ];
-            return [];
+            throw new RuntimeException($response['error'] ?: 'USGS could not be reached.');
         }
 
         $decoded = json_decode($response['body'], true);
-        if (!is_array($decoded) || !isset($decoded['features']) || !is_array($decoded['features'])) {
-            $this->providerStatus['usgs'] = ['status' => 'error', 'message' => 'USGS returned an invalid response.'];
-            return [];
+        if (!is_array($decoded) || !is_array($decoded['features'] ?? null)) {
+            throw new RuntimeException('USGS returned an invalid GeoJSON response.');
         }
 
+        $features = $decoded['features'];
         $events = [];
-        foreach ($decoded['features'] as $feature) {
-            $properties = is_array($feature['properties'] ?? null) ? $feature['properties'] : [];
-            $geometry = is_array($feature['geometry'] ?? null) ? $feature['geometry'] : [];
-            $coordinates = is_array($geometry['coordinates'] ?? null) ? $geometry['coordinates'] : [0, 0, 0];
-            $latitude = (float) ($coordinates[1] ?? 0);
-            $longitude = (float) ($coordinates[0] ?? 0);
-            $depthKm = (float) ($coordinates[2] ?? 0);
-            $magnitude = (float) ($properties['mag'] ?? 0);
-
-            if ($latitude === 0.0 && $longitude === 0.0) {
+        foreach ($features as $feature) {
+            if (!is_array($feature)) {
                 continue;
             }
-
+            $properties = is_array($feature['properties'] ?? null) ? $feature['properties'] : [];
+            $geometry = is_array($feature['geometry'] ?? null) ? $feature['geometry'] : [];
+            $coordinates = is_array($geometry['coordinates'] ?? null) ? $geometry['coordinates'] : [];
+            if (!isset($coordinates[0], $coordinates[1]) || !is_numeric($coordinates[0]) || !is_numeric($coordinates[1])) {
+                continue;
+            }
+            $longitude = (float) $coordinates[0];
+            $latitude = (float) $coordinates[1];
+            if (!$this->isPhilippinesCoordinate($latitude, $longitude)) {
+                continue;
+            }
+            $depthKm = (float) ($coordinates[2] ?? 0);
+            $magnitude = (float) ($properties['mag'] ?? 0);
             $distance = self::haversineKm($latitude, $longitude, self::DEFAULT_CENTER_LAT, self::DEFAULT_CENTER_LON);
-            $published = $distance <= 150 || $magnitude >= 4.5;
-            $alert = strtolower((string) ($properties['alert'] ?? ''));
-            $severity = $this->severityFromMagnitude($magnitude, $alert);
+            $alert = strtoupper((string) ($properties['alert'] ?? 'GREEN'));
+            $timestamp = (int) (($properties['time'] ?? time() * 1000) / 1000);
+            $externalId = (string) ($feature['id'] ?? $properties['ids'] ?? uniqid('usgs', true));
 
             $events[] = [
-                'id' => 'usgs-' . preg_replace('/[^A-Za-z0-9_-]+/', '-', (string) ($properties['ids'] ?? uniqid('event', true))),
+                'id' => 'usgs-' . $this->safeExternalId($externalId),
                 'source' => 'USGS',
                 'hazard_type' => 'EQ',
-                'title' => (string) ($properties['place'] ?? 'Seismic event'),
-                'severity_level' => $severity,
+                'title' => (string) ($properties['title'] ?? $properties['place'] ?? 'Seismic event'),
+                'severity_level' => $this->severityFromMagnitude($magnitude, $alert),
                 'magnitude_or_score' => $magnitude,
                 'depth_km' => $depthKm,
                 'latitude' => $latitude,
                 'longitude' => $longitude,
                 'distance_to_municipality_km' => round($distance, 2),
                 'affected_population' => null,
-                'event_timestamp' => gmdate('c', (int) (($properties['time'] ?? time() * 1000) / 1000)),
-                'alert_level' => $alert !== '' ? strtoupper($alert) : 'GREEN',
-                'tsunami' => !empty($properties['tsunami']),
+                'event_timestamp' => gmdate('c', $timestamp),
+                'alert_level' => $alert,
+                'is_philippines_event' => true,
                 'event_url' => $properties['url'] ?? null,
-                'is_published_to_residents' => $published ? 1 : 0,
+                'is_published_to_residents' => 1,
                 'raw_payload' => $feature,
             ];
         }
 
-        $this->providerStatus['usgs'] = ['status' => 'online', 'message' => null];
+        $this->lastDiagnostics['usgs'] = [
+            'records_fetched' => count($features),
+            'records_matched_region' => $this->countRegionallyRelevant($events),
+        ];
         return $events;
     }
 
-    private function fetchGdacsEvents(): array
+    private function fetchGdacsEvents(string $providerKey): array
     {
-        if (!$this->isProviderEnabled('gdacs') && !$this->isProviderEnabled('typhoon')) {
-            $this->providerStatus['gdacs'] = ['status' => 'disabled', 'message' => null];
-            $this->providerStatus['typhoon'] = ['status' => 'disabled', 'message' => null];
-            return [];
-        }
-
-        $providerKey = $this->isProviderEnabled('gdacs') ? 'gdacs' : 'typhoon';
         $settings = $this->systemApiSettings($providerKey);
+        $isTyphoonFeed = $providerKey === 'typhoon';
         $parameters = $settings['custom_parameters'] + [
-            'fromdate' => date('Y-m-d', strtotime('-14 days')),
-            'todate' => date('Y-m-d'),
+            'eventlist' => $isTyphoonFeed ? 'TC' : 'EQ;TC;FL;VO',
+            'alertlevel' => 'Green;Orange;Red',
+            'fromdate' => gmdate('Y-m-d', time() - ($isTyphoonFeed ? 14 : 30) * 86400),
+            'todate' => gmdate('Y-m-d'),
         ];
         $response = $this->requestConfiguredProvider($providerKey, $parameters);
-
         if (!is_string($response['body'])) {
-            $this->providerStatus['gdacs'] = [
-                'status' => 'error',
-                'message' => $response['error'] === 'Limit reached' ? 'Limit reached' : 'GDACS could not be reached.',
-                'rate_limit_until' => $response['retry_after_at'],
-            ];
-            return [];
+            throw new RuntimeException($response['error'] ?: 'GDACS could not be reached.');
         }
 
         $decoded = json_decode($response['body'], true);
         if (!is_array($decoded)) {
-            $this->providerStatus['gdacs'] = ['status' => 'error', 'message' => 'GDACS returned invalid JSON.'];
-            return [];
+            throw new RuntimeException('GDACS returned invalid JSON.');
         }
         $features = $decoded['features'] ?? $decoded['events'] ?? null;
         if (!is_array($features)) {
-            $this->providerStatus['gdacs'] = ['status' => 'error', 'message' => 'GDACS returned an unrecognized response.'];
-            return [];
+            throw new RuntimeException('GDACS returned an unrecognized event list.');
         }
 
         $events = [];
         foreach ($features as $feature) {
+            if (!is_array($feature)) {
+                continue;
+            }
             $properties = is_array($feature['properties'] ?? null) ? $feature['properties'] : [];
             $geometry = is_array($feature['geometry'] ?? null) ? $feature['geometry'] : [];
             $coordinates = $this->extractCoordinates($geometry, $properties);
-            $latitude = (float) ($coordinates['latitude'] ?? 0);
-            $longitude = (float) ($coordinates['longitude'] ?? 0);
-            $eventType = strtoupper((string) ($properties['eventtype'] ?? $properties['type'] ?? 'ALERT'));
-            $alert = strtoupper((string) ($properties['alertlevel'] ?? 'GREEN'));
-            $score = (float) ($properties['severitydata']['severity'] ?? $properties['severity'] ?? $properties['alertscore'] ?? $properties['score'] ?? 0);
-            $hasCoordinates = $latitude >= -90 && $latitude <= 90
-                && $longitude >= -180 && $longitude <= 180
+            $latitude = isset($coordinates['latitude']) ? (float) $coordinates['latitude'] : null;
+            $longitude = isset($coordinates['longitude']) ? (float) $coordinates['longitude'] : null;
+            $typeValue = $properties['eventtype'] ?? $properties['type'] ?? 'ALERT';
+            if (is_array($typeValue)) {
+                $typeValue = $typeValue['code'] ?? $typeValue['name'] ?? 'ALERT';
+            }
+            $eventType = strtoupper((string) $typeValue);
+            if ($isTyphoonFeed && $eventType !== 'TC') {
+                continue;
+            }
+            $isPhilippinesEvent = $this->isPhilippinesEvent($properties, $latitude, $longitude);
+            $isWithinPar = $eventType === 'TC' && $latitude !== null && $longitude !== null
+                && $latitude >= 5 && $latitude <= 25 && $longitude >= 115 && $longitude <= 135;
+            if (!$isPhilippinesEvent && !($isTyphoonFeed && $isWithinPar)) {
+                continue;
+            }
+            $hasCoordinates = $latitude !== null && $longitude !== null
                 && ($latitude !== 0.0 || $longitude !== 0.0);
             $distance = $hasCoordinates
                 ? self::haversineKm($latitude, $longitude, self::DEFAULT_CENTER_LAT, self::DEFAULT_CENTER_LON)
                 : null;
-            $affectedCountries = $properties['affectedcountries'] ?? [];
-            $isPhilippinesEvent = strtoupper((string) ($properties['iso3'] ?? '')) === 'PHL';
-            if (!$isPhilippinesEvent && is_array($affectedCountries)) {
-                foreach ($affectedCountries as $country) {
-                    if (strtoupper((string) ($country['iso3'] ?? '')) === 'PHL') {
-                        $isPhilippinesEvent = true;
-                        break;
-                    }
-                }
-            }
-            if (!$isPhilippinesEvent && ($distance === null || $distance > 500)) {
-                continue;
-            }
+            $alert = strtoupper((string) ($properties['alertlevel'] ?? $properties['alertLevel'] ?? 'GREEN'));
             $endDate = strtotime((string) ($properties['todate'] ?? ''));
             if ($endDate !== false && $endDate < strtotime('-2 days')) {
                 continue;
             }
+            $severityData = is_array($properties['severitydata'] ?? null) ? $properties['severitydata'] : [];
+            $score = (float) ($severityData['severity'] ?? $properties['severity'] ?? $properties['alertscore'] ?? $properties['score'] ?? 0);
             $providerUrl = $properties['url'] ?? null;
             $eventUrl = is_array($providerUrl)
                 ? ($providerUrl['report'] ?? $providerUrl['details'] ?? null)
                 : (is_string($providerUrl) ? $providerUrl : null);
-
             $startTimestamp = $properties['fromdate'] ?? $properties['datemodified'] ?? gmdate('c');
             $startEpoch = strtotime((string) $startTimestamp);
+            $externalId = (string) ($properties['eventid'] ?? $properties['id'] ?? $feature['id'] ?? $properties['name'] ?? uniqid('gdacs', true));
+
             $events[] = [
-                'id' => 'gdacs-' . preg_replace('/[^A-Za-z0-9_-]+/', '-', (string) ($properties['eventid'] ?? $properties['name'] ?? uniqid('gdacs', true))),
+                'id' => 'gdacs-' . $this->safeExternalId($externalId),
                 'source' => 'GDACS',
                 'hazard_type' => $eventType,
-                'title' => (string) ($properties['name'] ?? 'Regional hazard alert'),
-                'severity_level' => strtolower((string) ($alert === 'RED' ? 'red' : ($alert === 'ORANGE' ? 'orange' : 'green'))),
+                'title' => (string) ($properties['name'] ?? $properties['title'] ?? 'Regional hazard alert'),
+                'severity_level' => strtolower($alert === 'RED' ? 'red' : ($alert === 'ORANGE' ? 'orange' : 'green')),
                 'magnitude_or_score' => $score,
                 'depth_km' => null,
                 'latitude' => $hasCoordinates ? $latitude : null,
@@ -615,14 +1132,95 @@ class ExternalHazardService
                 'affected_population' => (int) ($properties['population'] ?? 0),
                 'event_timestamp' => gmdate('c', $startEpoch === false ? time() : $startEpoch),
                 'alert_level' => $alert,
+                'is_philippines_event' => $isPhilippinesEvent,
                 'affected_area' => $this->affectedArea($properties),
                 'event_url' => $eventUrl ?? $properties['urlreport'] ?? null,
-                'is_published_to_residents' => (($distance !== null && $distance <= 500) || $isPhilippinesEvent) ? 1 : 0,
+                'is_published_to_residents' => 1,
                 'raw_payload' => $feature,
             ];
         }
 
-        $this->providerStatus['gdacs'] = ['status' => 'online', 'message' => null];
+        $this->lastDiagnostics[$providerKey] = [
+            'records_fetched' => count($features),
+            'records_matched_region' => $this->countRegionallyRelevant($events),
+        ];
+        return $events;
+    }
+
+    private function fetchReliefWebEvents(): array
+    {
+        $settings = $this->systemApiSettings('reliefweb');
+        $parameters = $settings['custom_parameters'] + [
+            'appname' => 'bayanalert',
+            'profile' => 'full',
+            'preset' => 'latest',
+            'filter[field]' => 'country.iso3',
+            'filter[value]' => 'PHL',
+        ];
+        $response = $this->requestConfiguredProvider('reliefweb', $parameters);
+        if (!is_string($response['body'])) {
+            throw new RuntimeException($response['error'] ?: 'ReliefWeb could not be reached.');
+        }
+
+        $decoded = json_decode($response['body'], true);
+        if (!is_array($decoded) || !is_array($decoded['data'] ?? null)) {
+            throw new RuntimeException('ReliefWeb returned an invalid response.');
+        }
+
+        $events = [];
+        foreach ($decoded['data'] as $record) {
+            if (!is_array($record) || !is_array($record['fields'] ?? null)) {
+                continue;
+            }
+            $fields = $record['fields'];
+            $coordinates = $this->extractReliefWebCoordinates($fields);
+            $latitude = $coordinates['latitude'];
+            $longitude = $coordinates['longitude'];
+            if (!$this->isPhilippinesEvent($fields, $latitude, $longitude)) {
+                continue;
+            }
+            $hasCoordinates = $latitude !== null && $longitude !== null
+                && ($latitude !== 0.0 || $longitude !== 0.0);
+            $distance = $hasCoordinates
+                ? self::haversineKm($latitude, $longitude, self::DEFAULT_CENTER_LAT, self::DEFAULT_CENTER_LON)
+                : null;
+            $types = is_array($fields['type'] ?? null) ? $fields['type'] : [];
+            $typeName = isset($types[0]['name'])
+                ? (string) $types[0]['name']
+                : (string) ($types['name'] ?? 'Disaster');
+            $dateFields = is_array($fields['date'] ?? null) ? $fields['date'] : [];
+            $date = $dateFields['event'] ?? $dateFields['created'] ?? $dateFields['changed'] ?? null;
+            $timestamp = is_string($date) ? strtotime($date) : false;
+            $externalId = (string) ($record['id'] ?? $fields['id'] ?? uniqid('reliefweb', true));
+            $title = (string) ($fields['name'] ?? $fields['title'] ?? 'Philippines disaster report');
+            $countryNames = $this->reliefWebCountryNames($fields);
+
+            $events[] = [
+                'id' => 'reliefweb-' . $this->safeExternalId($externalId),
+                'source' => 'RELIEFWEB',
+                'hazard_type' => strtoupper(substr($typeName, 0, 8)),
+                'title' => $title,
+                'severity_level' => 'green',
+                'magnitude_or_score' => null,
+                'depth_km' => null,
+                'latitude' => $hasCoordinates ? $latitude : null,
+                'longitude' => $hasCoordinates ? $longitude : null,
+                'distance_to_municipality_km' => $distance === null ? null : round($distance, 2),
+                'affected_population' => null,
+                'event_timestamp' => gmdate('c', $timestamp === false ? time() : $timestamp),
+                'alert_level' => 'INFORMATION',
+                'is_philippines_event' => true,
+                'affected_area' => $countryNames ? implode(', ', $countryNames) : 'Philippines',
+                'event_url' => $fields['url'] ?? null,
+                'is_published_to_residents' => 1,
+                'raw_payload' => $record,
+            ];
+        }
+
+        $this->lastDiagnostics['reliefweb'] = [
+            'records_fetched' => count($decoded['data']),
+            'records_matched_region' => $this->countRegionallyRelevant($events),
+        ];
         return $events;
     }
 
@@ -793,16 +1391,27 @@ class ExternalHazardService
         } elseif ($key === 'usgs') {
             $parameters += [
                 'format' => 'geojson',
-                'starttime' => date('Y-m-d', strtotime('-7 days')),
-                'latitude' => self::DEFAULT_CENTER_LAT,
-                'longitude' => self::DEFAULT_CENTER_LON,
-                'maxradiuskm' => 300,
+                'starttime' => gmdate('Y-m-d\TH:i:s\Z', time() - 7 * 86400),
                 'minmagnitude' => 2.5,
+                'minlatitude' => 4.5,
+                'maxlatitude' => 21.5,
+                'minlongitude' => 116.0,
+                'maxlongitude' => 127.0,
             ];
         } elseif ($key === 'gdacs' || $key === 'typhoon') {
             $parameters += [
-                'fromdate' => date('Y-m-d', strtotime('-14 days')),
-                'todate' => date('Y-m-d'),
+                'eventlist' => $key === 'typhoon' ? 'TC' : 'EQ;TC;FL;VO',
+                'alertlevel' => 'Green;Orange;Red',
+                'fromdate' => gmdate('Y-m-d', time() - ($key === 'typhoon' ? 14 : 30) * 86400),
+                'todate' => gmdate('Y-m-d'),
+            ];
+        } elseif ($key === 'reliefweb') {
+            $parameters += [
+                'appname' => 'bayanalert',
+                'profile' => 'full',
+                'preset' => 'latest',
+                'filter[field]' => 'country.iso3',
+                'filter[value]' => 'PHL',
             ];
         } elseif ($key === 'hdx') {
             $parameters += ['id' => 'cod-ab-phl'];
@@ -860,22 +1469,10 @@ class ExternalHazardService
             return 1;
         }
         if ($key === 'nasa_eonet') {
-            $events = is_array($decoded['events'] ?? null) ? $decoded['events'] : [];
-            $weather = $this->httpRequest(
-                'https://api.open-meteo.com/v1/forecast?' . http_build_query([
-                    'latitude' => self::DEFAULT_CENTER_LAT,
-                    'longitude' => self::DEFAULT_CENTER_LON,
-                    'current' => 'temperature_2m',
-                ]),
-                ['Accept: application/json']
-            );
-            if (!is_string($weather['body']) || !is_array(json_decode($weather['body'], true))) {
-                throw new RuntimeException(
-                    'Open-Meteo connection failed: ' .
-                    ($weather['error'] ?: 'Provider returned an invalid response.')
-                );
-            }
-            return count($events);
+            return count(is_array($decoded['events'] ?? null) ? $decoded['events'] : []);
+        }
+        if ($key === 'reliefweb') {
+            return count(is_array($decoded['data'] ?? null) ? $decoded['data'] : []);
         }
         if ($key === 'weatherapi') {
             if (isset($decoded['error'])) {
@@ -902,7 +1499,7 @@ class ExternalHazardService
             'VALUES (?, ?, ?, 1, NOW(), ?, ?, ?, ?, NOW(), NOW()) ' .
             'ON DUPLICATE KEY UPDATE last_synced_at = VALUES(last_synced_at), last_status = VALUES(last_status), ' .
             'last_error_message = VALUES(last_error_message), rate_limit_until = VALUES(rate_limit_until), ' .
-            'records_cached = VALUES(records_cached), updated_at = NOW()',
+            "records_cached = IF(VALUES(last_status) = 'online', VALUES(records_cached), records_cached), updated_at = NOW()",
             [$key, $provider['display_name'], $provider['endpoint_url'], $status, $error, $this->lastRetryAfterAt, $records]
         );
         $this->db->raw(

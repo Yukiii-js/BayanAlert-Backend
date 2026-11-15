@@ -16,11 +16,8 @@ class ExternalApiController extends Controller
         try {
             $service = new ExternalHazardService();
             $feed = $service->getResidentFeed();
-            try {
-                $service->publishHighSeverityNotifications($feed['events']);
-            } catch (Throwable $notificationError) {
-                error_log('External hazard notification sync failed: ' . $notificationError->getMessage());
-                $feed['warnings'] = ['External advisory notifications could not be saved.'];
+            if (!headers_sent()) {
+                header('Cache-Control: public, max-age=30, stale-while-revalidate=60');
             }
             api_response($feed);
         } catch (Throwable $exception) {
