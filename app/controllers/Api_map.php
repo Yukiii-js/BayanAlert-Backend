@@ -18,6 +18,15 @@ class Api_map extends Controller
             $severityColumn = in_array('severity_level', $columns, true)
                 ? 'r.severity_level'
                 : 'NULL AS severity_level';
+            $titleColumn = in_array('title', $columns, true)
+                ? 'r.title'
+                : "'' AS title";
+            $descriptionColumn = in_array('description', $columns, true)
+                ? 'LEFT(r.description, 240) AS description'
+                : "'' AS description";
+            $submittedAtColumn = in_array('submitted_at', $columns, true)
+                ? 'r.submitted_at'
+                : 'NULL AS submitted_at';
 
             $categories = $this->db->table('hazard_categories')
                 ->select('category_id, category_name')
@@ -27,7 +36,9 @@ class Api_map extends Controller
             $reports = [];
             if ($coordinatesAvailable) {
                 $reports = $this->db->raw(
-                    'SELECT r.category_id, r.status, ' . $severityColumn . ', r.latitude, r.longitude, c.category_name ' .
+                    'SELECT r.report_id, r.reference_number, r.category_id, r.status, ' . $severityColumn . ', ' .
+                    $titleColumn . ', ' . $descriptionColumn . ', ' . $submittedAtColumn . ', ' .
+                    'r.latitude, r.longitude, c.category_name ' .
                     'FROM hazard_reports r ' .
                     'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
                     'WHERE r.latitude BETWEEN 13.25 AND 13.55 ' .
