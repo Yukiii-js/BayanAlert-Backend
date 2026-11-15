@@ -11,7 +11,8 @@ class Auth_model extends Model {
     {
         $result = $this->db->raw(
             'SELECT users.user_id, users.role_id, users.full_name, users.password_hash, ' .
-            'users.account_status, users.email_verified_at, roles.role_name ' .
+            'users.account_status, users.status, users.suspension_reason, ' .
+            'users.email_verified_at, roles.role_name ' .
             'FROM users INNER JOIN roles ON roles.role_id = users.role_id ' .
             'WHERE LOWER(users.email) = LOWER(?) OR LOWER(users.username) = LOWER(?) LIMIT 1',
             [$login, $login]
@@ -74,7 +75,7 @@ class Auth_model extends Model {
 
     public function get_active_barangays() {
         return $this->db->table('barangays')
-                        ->select('barangay_id, barangay_name')
+                        ->select('barangay_id, barangay_name, latitude, longitude')
                         ->where('is_active', 1)
                         ->get_all();
     }

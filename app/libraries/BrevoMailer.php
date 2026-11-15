@@ -125,6 +125,35 @@ class BrevoMailer
         );
     }
 
+    public function sendPasswordResetEmail($email, $fullName, $token)
+    {
+        $frontendUrl = rtrim(trim((string) getenv('FRONTEND_URL')), '/');
+        if ($frontendUrl === '') {
+            error_log('Brevo password reset email was not sent: FRONTEND_URL is not configured.');
+            return ['success' => false, 'error' => 'The password reset link is not configured.'];
+        }
+
+        $resetUrl = $frontendUrl . '/reset-password?token=' . rawurlencode($token);
+        $safeName = $this->escape($fullName);
+        $safeUrl = $this->escape($resetUrl);
+        $html = '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.6">'
+            . '<h2>Reset your BayanAlert password</h2>'
+            . '<p>Hello ' . $safeName . ',</p>'
+            . '<p>Use the link below to choose a new password. This link expires in one hour and can only be used once.</p>'
+            . '<p><a href="' . $safeUrl . '" style="display:inline-block;padding:12px 18px;background:#059669;color:#fff;text-decoration:none;border-radius:8px">Reset password</a></p>'
+            . '<p>If the button does not work, copy this link into your browser:<br><a href="' . $safeUrl . '">' . $safeUrl . '</a></p>'
+            . '<p>If you did not request a password reset, you can ignore this message.</p>'
+            . '</body></html>';
+
+        return $this->sendEmail(
+            $email,
+            $fullName,
+            'Reset your BayanAlert password',
+            $html,
+            "Hello {$fullName},\n\nUse the link below to reset your BayanAlert password within one hour:\n{$resetUrl}\n\nIf you did not request a password reset, ignore this message."
+        );
+    }
+
     /**
      * Route an approved report to the appropriate emergency department.
      */

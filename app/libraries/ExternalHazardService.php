@@ -698,11 +698,23 @@ class ExternalHazardService
     private function systemApiSettings(string $key): array
     {
         $defaults = $this->providerCatalog()[$key];
-        $row = $this->db->raw(
-            'SELECT endpoint_url, credential_encrypted, auth_header_type, auth_header_name, custom_parameters_json ' .
-            'FROM system_apis WHERE api_key = ? LIMIT 1',
-            [$key]
-        )->fetch(PDO::FETCH_ASSOC);
+        try {
+            $row = $this->db->raw(
+                'SELECT endpoint_url, credential_encrypted, auth_header_type, auth_header_name, custom_parameters_json ' .
+                'FROM system_apis WHERE api_key = ? LIMIT 1',
+                [$key]
+            )->fetch(PDO::FETCH_ASSOC);
+        } catch (Throwable $exception) {
+            $errorInfo = $exception instanceof PDOException ? ($exception->errorInfo ?? []) : [];
+            $sqlState = (string) ($errorInfo[0] ?? $exception->getCode());
+            $driverCode = (int) ($errorInfo[1] ?? 0);
+            if ($sqlState !== '42S02' && $driverCode !== 1146) {
+                throw $exception;
+            }
+
+            error_log('System API registry table is missing; using environment-backed provider settings.');
+            $row = null;
+        }
         if (!$row) {
             $environmentCredential = $key === 'weatherapi'
                 ? trim((string) getenv('WEATHERAPI_KEY'))

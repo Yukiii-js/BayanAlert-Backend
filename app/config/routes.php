@@ -52,6 +52,7 @@ $router->post('auth/logout', 'Auth::logout');
 $router->get('admin', 'Admin::index');
 $router->get('admin/reports/hazards', 'AdminReportController::hazard_pdf');
 $router->get('api/admin/reports/hazards', 'AdminReportController::hazard_pdf');
+$router->get('api/admin/reports/options', 'AdminReportController::report_options');
 $router->get('api/admin/reports', 'AdminReportController::report_pdf');
 $router->get('admin/tables/{table}', 'Admin::table');
 $router->get('admin/tables/{table}/create', 'Admin::create');
@@ -99,14 +100,20 @@ $router->post('api/auth/register', 'Api_auth::register');
 $router->post('api/auth/send-registration-verification', 'Api_auth::sendRegistrationVerification');
 $router->post('api/auth/verify-email', 'Api_auth::verifyEmail');
 $router->post('api/auth/resend-verification', 'Api_auth::resendVerificationEmail');
+$router->post('api/auth/request-password-reset', 'Api_auth::requestPasswordReset');
+$router->post('api/auth/reset-password', 'Api_auth::resetPassword');
 
 // Notifications and resident announcements
 $router->get('api/notifications', 'Api_notifications::index');
 $router->post('api/notifications/{id}/read', 'Api_notifications::markRead');
 $router->post('api/admin/announcements', 'Api_notifications::announce');
+$router->post('api/admin/users/{id}/warning-strike', 'Api_admin_moderation::issueWarningStrike');
+$router->post('api/admin/users/{id}/suspension', 'Api_admin_moderation::setSuspension');
+$router->post('api/admin/reports/{id}/resolve', 'Api_admin_moderation::resolveReport');
 
 // Barangay dropdown API
 $router->get('api/barangays', 'Api_barangays::index');
+$router->get('api/location-suggestions', 'Api_barangays::suggestions');
 
 
 // Resident Reports API

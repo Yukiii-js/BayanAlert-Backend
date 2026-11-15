@@ -217,6 +217,11 @@ listing, create/update, connection testing, cache/rate-limit reset, and deletion
 For a manual phpMyAdmin/MySQL alternative, select the BayanAlert database and run
 [`manual_migrations_004_008_009.sql`](./manual_migrations_004_008_009.sql) instead of applying
 those migrations separately. It creates the notifications table only if missing and can be re-run.
+After importing the BayanAlert schema, run
+[`manual_migration_011_barangays_moderation_resolved.sql`](./manual_migration_011_barangays_moderation_resolved.sql)
+to seed the 62 Calapan barangays and approximate map centers, add report and barangay coordinates,
+enable three-strike account moderation, and add resolved-report timestamps. The script is
+safe to re-run and is required before using the location suggestions and moderation APIs.
 Set a stable `APP_KEY` of at least 32 characters before saving API credentials: credentials in
 the registry are encrypted with AES-256-GCM and cannot be recovered if this key is changed.
 Edits to built-in endpoint, credential, authentication, and parameter settings are used by the
@@ -281,6 +286,14 @@ The frontend keeps one authenticated account type per browser at a time. Sign ou
 The authenticated resident dashboard endpoint `GET /api/reports/community` returns current hazard reports, status/category totals, reporter-barangay totals, and only the signed-in resident's notifications. Community reports include confirm/dispute totals and the signed-in resident's vote; `POST /api/reports/{id}/vote` accepts `{"vote":"confirm"}`, `{"vote":"dispute"}`, or `{"vote":null}` to remove a vote. Each resident has one changeable vote per report and cannot vote on their own report. Report responses omit reporter identity and exact address details.
 
 The admin portal's **Notifications** page shows new-report notifications and lets admins publish announcements. `POST /api/admin/announcements` sends a notification to every active account with the `resident` or `user` role. Residents receive notifications when an admin changes the status of one of their reports and can mark notifications as read. The notification APIs are `GET /api/notifications` and `POST /api/notifications/{id}/read`; notification records are scoped to their recipient.
+
+After migration `011`, `GET /api/barangays` includes barangay center coordinates and
+`GET /api/location-suggestions?q=...` returns matching barangays and previously reported
+locations. Admins can issue warning strikes with `POST /api/admin/users/{id}/warning-strike`,
+directly suspend or reactivate with `POST /api/admin/users/{id}/suspension`, and resolve active
+reports with `POST /api/admin/reports/{id}/resolve`. Three strikes automatically suspend a
+resident; suspended residents cannot sign in or submit/edit reports. Resolved incidents stay
+in the admin and PDF history but are excluded from live hazard-map markers.
 
 For a fresh local database, import `bayanalert_schema.sql` from a MySQL/MariaDB client or phpMyAdmin. It creates all application tables, including `notifications` and report coordinates, and seeds the required `admin`, `resident`, and compatibility `user` roles. It does not erase existing tables. The importing database user needs permission to create the `bayanalert_db` database, or you can select a database and remove the `CREATE DATABASE` and `USE` statements first.
 
@@ -393,6 +406,18 @@ WHERE account_status = 'active'
 Verification endpoints are `POST /api/auth/verify-email` with `{"token":"..."}`,
 `POST /api/auth/resend-verification` with `{"email":"..."}`, and
 `POST /api/auth/send-registration-verification` with `{"email":"..."}`.
+The Brevo integration uses `.env` defaults when the optional `system_apis`
+registry is not installed; set `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`,
+`BREVO_SENDER_NAME`, and the deployed frontend's `FRONTEND_URL`. The sender
+address must be verified with Brevo.
+
+Resident sign-in provides a password-reset link for verified resident accounts.
+Reset tokens are stored hashed, expire after one hour, are single-use, and are
+rate-limited to one email per account per minute. The API creates
+`password_reset_tokens` on first use; if the database account cannot create
+tables, run [`manual_migration_010_password_reset_tokens.sql`](./manual_migration_010_password_reset_tokens.sql)
+in the selected database. The reset routes are
+`POST /api/auth/request-password-reset` and `POST /api/auth/reset-password`.
 
 When an admin marks a hazard report `verified` or `approved`, the edit form
 preselects the routed department email, shows the report details to be sent, and

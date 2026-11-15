@@ -27,6 +27,31 @@ class Api_reports extends Controller
         return (int) ($this->currentUser['user_id'] ?? $this->currentUser['sub'] ?? 0);
     }
 
+    private function ensureNotSuspended()
+    {
+        try {
+            $user = $this->db->raw(
+                'SELECT status, suspension_reason FROM users WHERE user_id = ? LIMIT 1',
+                [$this->userId()]
+            )->fetch(PDO::FETCH_ASSOC);
+            if (!$user || strtolower(trim((string) ($user['status'] ?? 'active'))) !== 'suspended') {
+                return true;
+            }
+
+            $reason = trim((string) ($user['suspension_reason'] ?? ''));
+            api_error(
+                'Your account is suspended and cannot submit or edit hazard reports.' .
+                    ($reason !== '' ? ' Reason: ' . $reason : ''),
+                403
+            );
+            return false;
+        } catch (\Throwable $e) {
+            error_log('Suspension check failed for user ' . $this->userId() . ': ' . $e->getMessage());
+            api_error('Unable to verify your account status. Please try again later.', 503);
+            return false;
+        }
+    }
+
     private function validId($id)
     {
         return ctype_digit((string) $id) && (int) $id > 0;
@@ -50,6 +75,13 @@ class Api_reports extends Controller
 
         return in_array('latitude', $columns, true)
             && in_array('longitude', $columns, true);
+    }
+
+    private function hasSeverityColumn()
+    {
+        $columns = $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')
+            ->fetchAll(PDO::FETCH_COLUMN);
+        return in_array('severity_level', $columns, true);
     }
 
     private function reportCoordinates($input)
@@ -109,6 +141,7 @@ class Api_reports extends Controller
                 'hazard_reports.description, hazard_reports.address_details, hazard_reports.status, ' .
                 'hazard_reports.submitted_at, hazard_reports.updated_at, ' .
                 ($this->hasReportCoordinates() ? 'hazard_reports.latitude, hazard_reports.longitude, ' : '') .
+                ($this->hasSeverityColumn() ? 'hazard_reports.severity_level, ' : 'NULL AS severity_level, ') .
                 'hazard_categories.category_name, stations.station_name'
             )
             ->join('hazard_categories', 'hazard_categories.category_id = hazard_reports.category_id')
@@ -205,6 +238,9 @@ class Api_reports extends Controller
             if ($this->hasReportCoordinates()) {
                 $select .= 'hazard_reports.latitude, hazard_reports.longitude, ';
             }
+            $select .= $this->hasSeverityColumn()
+                ? 'hazard_reports.severity_level, '
+                : 'NULL AS severity_level, ';
 
             $reports = $this->db->table('hazard_reports')
             ->select(
@@ -508,6 +544,8 @@ class Api_reports extends Controller
 
     public function store()
     {
+        if (!$this->ensureNotSuspended()) return;
+
         $uploadError = $this->uploadRequestError();
         if ($uploadError !== null) {
             api_error($uploadError['message'], $uploadError['status']);
@@ -521,6 +559,7 @@ class Api_reports extends Controller
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
         $address = trim((string) ($input['address_details'] ?? ''));
+        $severity = strtolower(trim((string) ($input['severity_level'] ?? 'moderate')));
         $coordinates = $this->reportCoordinates($input);
         if ($coordinates === null) {
             return;
@@ -528,6 +567,10 @@ class Api_reports extends Controller
 
         if ($categoryId < 1 || $title === '' || $description === '' || $address === '') {
             api_error('Category, title, description, and address are required.', 422);
+            return;
+        }
+        if (!in_array($severity, ['low', 'moderate', 'high', 'critical'], true)) {
+            api_error('Choose a valid hazard severity level.', 422);
             return;
         }
 
@@ -557,6 +600,7 @@ class Api_reports extends Controller
                 'title' => $title,
                 'description' => $description,
                 'address_details' => $address,
+                'severity_level' => $severity,
                 'status' => 'pending',
                 'submitted_at' => date('Y-m-d H:i:s'),
                 'updated_at' => date('Y-m-d H:i:s')
@@ -564,6 +608,7 @@ class Api_reports extends Controller
             if ($this->hasReportCoordinates()) {
                 $reportData = array_merge($reportData, $coordinates);
             }
+            if (!$this->hasSeverityColumn()) unset($reportData['severity_level']);
 
             $inserted = $this->db->table('hazard_reports')->insert($reportData);
 
@@ -628,6 +673,8 @@ class Api_reports extends Controller
 
     public function update($id)
     {
+        if (!$this->ensureNotSuspended()) return;
+
         if (!$this->validId($id)) {
             api_error('Invalid report ID.', 400);
             return;
@@ -646,6 +693,7 @@ class Api_reports extends Controller
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
         $address = trim((string) ($input['address_details'] ?? ''));
+        $severity = strtolower(trim((string) ($input['severity_level'] ?? 'moderate')));
         $coordinates = $this->reportCoordinates($input);
         if ($coordinates === null) {
             return;
@@ -653,6 +701,10 @@ class Api_reports extends Controller
 
         if ($categoryId < 1 || $title === '' || $description === '' || $address === '') {
             api_error('Category, title, description, and address are required.', 422);
+            return;
+        }
+        if (!in_array($severity, ['low', 'moderate', 'high', 'critical'], true)) {
+            api_error('Choose a valid hazard severity level.', 422);
             return;
         }
 
@@ -691,6 +743,9 @@ class Api_reports extends Controller
                 'address_details' => $address,
                 'updated_at' => date('Y-m-d H:i:s')
             ];
+            if ($this->hasSeverityColumn()) {
+                $reportData['severity_level'] = $severity;
+            }
             if ($this->hasReportCoordinates()) {
                 $reportData = array_merge($reportData, $coordinates);
             }

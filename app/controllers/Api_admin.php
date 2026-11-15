@@ -178,6 +178,12 @@ class Api_admin extends Controller
         if ($validation['error'] !== null) {
             api_error($validation['error'], 422);
         }
+        if ($table === 'hazard_reports'
+            && strtolower(trim((string) ($validation['data']['status'] ?? ''))) === 'resolved'
+            && strtolower(trim((string) ($record['status'] ?? ''))) !== 'resolved') {
+            api_error('Use the Mark as Resolved action so the resolution timestamp is recorded.', 422);
+            return;
+        }
 
         try {
             $oldStatus = strtolower(trim((string) ($record['status'] ?? '')));
