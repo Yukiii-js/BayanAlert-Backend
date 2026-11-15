@@ -162,9 +162,12 @@ class BrevoMailer
         $departmentCode = $this->getDepartmentForCategory(
             (string) ($hazardReportData['category_name'] ?? '')
         );
+        $department = $departmentCode !== null
+            ? $this->getDepartmentDetails($departmentCode)
+            : null;
         $recipientEmail = isset($hazardReportData['notification_email'])
             ? trim((string) $hazardReportData['notification_email'])
-            : ($departmentCode !== null ? self::DEPARTMENTS[$departmentCode]['email'] : '');
+            : (string) ($department['email'] ?? '');
 
         if ($departmentCode === null && $recipientEmail === '') {
             $category = trim((string) ($hazardReportData['category_name'] ?? 'Uncategorized'));
@@ -176,9 +179,13 @@ class BrevoMailer
             return ['success' => false, 'error' => 'The department notification recipient is invalid.'];
         }
 
-        $department = $departmentCode !== null
-            ? self::DEPARTMENTS[$departmentCode]
-            : ['name' => 'Emergency response contact', 'email' => $recipientEmail];
+        $contactByEmail = $this->getStationDetailsByEmail($recipientEmail);
+        if ($contactByEmail !== null) {
+            $department = $contactByEmail;
+        }
+        if ($department === null) {
+            $department = ['name' => 'Emergency response contact', 'email' => $recipientEmail];
+        }
         $escape = function ($value) {
             return $this->escape((string) ($value ?? 'Not provided'));
         };
@@ -251,7 +258,7 @@ class BrevoMailer
             implode("\n", $textRows)
         );
         if ($result['success']) {
-            $result['department'] = $departmentCode;
+            $result['department'] = $department['code'] ?? $departmentCode;
         }
         return $result;
     }
@@ -280,7 +287,58 @@ class BrevoMailer
     public function getDepartmentDetailsForCategory($category)
     {
         $departmentCode = $this->getDepartmentForCategory($category);
-        return $departmentCode !== null ? self::DEPARTMENTS[$departmentCode] + ['code' => $departmentCode] : null;
+        return $departmentCode !== null ? $this->getDepartmentDetails($departmentCode) : null;
+    }
+
+    private function getDepartmentDetails($departmentCode)
+    {
+        $fallback = self::DEPARTMENTS[$departmentCode] + ['code' => $departmentCode];
+        try {
+            $station = lava_instance()->db->table('stations')
+                ->select('department_code, station_name, contact_email, address_details, contact_number, station_info')
+                ->where('department_code', $departmentCode)
+                ->where('is_active', 1)
+                ->get();
+            if ($station && filter_var(trim((string) ($station['contact_email'] ?? '')), FILTER_VALIDATE_EMAIL)) {
+                return [
+                    'code' => $station['department_code'],
+                    'name' => $station['station_name'],
+                    'email' => $station['contact_email'],
+                    'address' => $station['address_details'] ?? '',
+                    'contact_number' => $station['contact_number'] ?? '',
+                    'info' => $station['station_info'] ?? '',
+                ];
+            }
+        } catch (\Throwable $error) {
+            error_log('Unable to load response station contact for ' . $departmentCode . ': ' . $error->getMessage());
+        }
+
+        return $fallback;
+    }
+
+    private function getStationDetailsByEmail($email)
+    {
+        try {
+            $station = lava_instance()->db->table('stations')
+                ->select('department_code, station_name, contact_email, address_details, contact_number, station_info')
+                ->where('contact_email', $email)
+                ->where('is_active', 1)
+                ->get();
+            if ($station) {
+                return [
+                    'code' => $station['department_code'],
+                    'name' => $station['station_name'],
+                    'email' => $station['contact_email'],
+                    'address' => $station['address_details'] ?? '',
+                    'contact_number' => $station['contact_number'] ?? '',
+                    'info' => $station['station_info'] ?? '',
+                ];
+            }
+        } catch (\Throwable $error) {
+            error_log('Unable to resolve response station email: ' . $error->getMessage());
+        }
+
+        return null;
     }
 
     private function publicMediaUrl($filePath)

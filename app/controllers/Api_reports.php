@@ -532,7 +532,10 @@ class Api_reports extends Controller
     {
         try {
             $stations = $this->db->table('stations')
-                ->select('station_id, station_name')
+                ->select(
+                    'station_id, department_code, station_name, address_details, contact_number, ' .
+                    'contact_email, station_info, latitude, longitude, is_active'
+                )
                 ->get_all();
 
             api_response(['stations' => $stations ?: []]);
