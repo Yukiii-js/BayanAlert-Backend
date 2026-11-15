@@ -217,6 +217,16 @@ and do not require API keys. The Leaflet map uses the clipped, WGS84 GeoJSON at
 `0120c30e-ba8b-487d-83f5-a664eddd3a8e`). The full national archive is nearly 1 GB; only the
 Calapan City features are bundled and served by the frontend, so neither the browser nor Render
 downloads the national archive. Preserve UN OCHA HDX attribution when updating this subset.
+The map also serves `BayanAlert-Frontend/public/data/calapan_emergency_places.geojson`, a static
+OpenStreetMap snapshot filtered to points inside those Calapan barangay polygons. It is rendered
+alongside the HDX barangay boundaries by default, with independently toggleable layers; the
+source is © OpenStreetMap contributors under the ODbL.
+Update the bundled snapshot deliberately and retain its source/snapshot metadata when refreshing.
+Hospitals, clinics, and police locations are mapped listings, not a guarantee of current operations.
+Schools and community facilities are shown only as **unverified possible evacuation sites** and
+must be confirmed with Calapan City DRRMO before anyone relies on them. The current snapshot has
+no OSM-tagged Calapan fire station or designated evacuation center; this does not establish that
+none exist in reality.
 For production, set
 `APP_ENV=production` and set a random `APP_KEY` in the backend host's environment;
 the key is required for CSRF protection and must not be committed. Generate one
