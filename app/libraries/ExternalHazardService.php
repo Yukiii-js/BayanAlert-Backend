@@ -855,7 +855,7 @@ class ExternalHazardService
                     'longitude' => self::DEFAULT_CENTER_LON,
                     'current' => 'temperature_2m',
                 ]),
-                $headers
+                ['Accept: application/json']
             );
             if (!is_string($weather['body']) || !is_array(json_decode($weather['body'], true))) {
                 throw new RuntimeException(
