@@ -70,7 +70,7 @@ class ExternalHazardService
             ],
             'reliefweb' => [
                 'display_name' => 'ReliefWeb Disasters API',
-                'endpoint_url' => 'https://api.reliefweb.int/v1/disasters',
+                'endpoint_url' => 'https://api.reliefweb.int/v2/disasters',
                 'category' => 'Hazard',
                 'auth_header_type' => 'none',
                 'auth_header_name' => null,
@@ -83,6 +83,17 @@ class ExternalHazardService
                 'auth_header_name' => 'api-key',
             ],
         ];
+    }
+
+    private function providerResponseError(string $key, array $response): string
+    {
+        if ($key === 'reliefweb' && (int) ($response['status'] ?? 0) === 403) {
+            return 'ReliefWeb requires a pre-approved appname. Request one from ReliefWeb, then set it in API Management > Edit > Custom Parameters JSON as {"appname":"your-approved-appname"}.';
+        }
+        if ($key === 'reliefweb' && (int) ($response['status'] ?? 0) === 410) {
+            return 'ReliefWeb v1 is retired. Use the v2/disasters endpoint; the saved legacy endpoint will be updated automatically.';
+        }
+        return (string) ($response['error'] ?? '') ?: 'Provider connection failed.';
     }
 
     public function getResidentFeed(): array
@@ -1159,7 +1170,7 @@ class ExternalHazardService
         ];
         $response = $this->requestConfiguredProvider('reliefweb', $parameters);
         if (!is_string($response['body'])) {
-            throw new RuntimeException($response['error'] ?: 'ReliefWeb could not be reached.');
+            throw new RuntimeException($this->providerResponseError('reliefweb', $response));
         }
 
         $decoded = json_decode($response['body'], true);
@@ -1291,6 +1302,19 @@ class ExternalHazardService
                 ]
             );
         }
+
+        $retiredReliefWebEndpoint = 'https://api.reliefweb.int/v1/disasters';
+        $currentReliefWebEndpoint = $this->providerCatalog()['reliefweb']['endpoint_url'];
+        $this->db->raw(
+            'UPDATE external_api_configs SET endpoint_url = ?, updated_at = NOW() ' .
+            'WHERE api_key = ? AND endpoint_url = ?',
+            [$currentReliefWebEndpoint, 'reliefweb', $retiredReliefWebEndpoint]
+        );
+        $this->db->raw(
+            'UPDATE system_apis SET endpoint_url = ?, updated_at = NOW() ' .
+            'WHERE api_key = ? AND endpoint_url = ?',
+            [$currentReliefWebEndpoint, 'reliefweb', $retiredReliefWebEndpoint]
+        );
     }
 
     private function systemApiSettings(string $key): array
@@ -1412,6 +1436,9 @@ class ExternalHazardService
                 'preset' => 'latest',
                 'filter[field]' => 'country.iso3',
                 'filter[value]' => 'PHL',
+                'limit' => 100,
+                'limit' => 100,
+                'limit' => 100,
             ];
         } elseif ($key === 'hdx') {
             $parameters += ['id' => 'cod-ab-phl'];
@@ -1437,8 +1464,10 @@ class ExternalHazardService
             : $this->requestConfiguredProvider($key, $parameters);
         if (!is_string($response['body'])) {
             throw new RuntimeException(
-                $providerName . ' connection failed: ' .
-                ($response['error'] ?: 'Provider connection failed.')
+                $key === 'reliefweb'
+                    ? $this->providerResponseError($key, $response)
+                    : $providerName . ' connection failed: ' .
+                        ($response['error'] ?: 'Provider connection failed.')
             );
         }
         $decoded = json_decode($response['body'], true);
