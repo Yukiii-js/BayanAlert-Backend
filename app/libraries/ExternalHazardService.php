@@ -461,6 +461,7 @@ class ExternalHazardService
             return ['body' => null, 'status' => 0, 'error' => 'Unable to initialize the provider request.'];
         }
 
+        $retryAfter = null;
         curl_setopt_array($curl, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
@@ -469,6 +470,13 @@ class ExternalHazardService
             CURLOPT_USERAGENT => 'BayanAlertExternalHazards/1.0',
             CURLOPT_HEADER => false,
             CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_HEADERFUNCTION => static function ($handle, string $headerLine) use (&$retryAfter): int {
+                $parts = explode(':', $headerLine, 2);
+                if (count($parts) === 2 && strtolower(trim($parts[0])) === 'retry-after') {
+                    $retryAfter = trim($parts[1]);
+                }
+                return strlen($headerLine);
+            },
         ]);
 
         $body = curl_exec($curl);
@@ -477,10 +485,17 @@ class ExternalHazardService
         curl_close($curl);
 
         if (!is_string($body) || $body === '' || $error !== '' || $statusCode < 200 || $statusCode >= 300) {
+            $message = $error !== '' ? $error : 'Provider returned HTTP ' . $statusCode . '.';
+            if ($statusCode === 429) {
+                $message = 'Provider returned HTTP 429 (rate limited).';
+                $message .= $retryAfter !== null && $retryAfter !== ''
+                    ? ' Retry-After: ' . $retryAfter . '.'
+                    : ' Wait before retrying.';
+            }
             return [
                 'body' => null,
                 'status' => $statusCode,
-                'error' => $error !== '' ? $error : 'Provider returned HTTP ' . $statusCode . '.',
+                'error' => $message,
             ];
         }
 
@@ -547,9 +562,15 @@ class ExternalHazardService
             $headers[] = 'api-key: ' . $apiKey;
         }
 
+        $providerName = $key === 'nasa_eonet'
+            ? 'NASA EONET'
+            : $catalog[$key]['display_name'];
         $response = $this->httpRequest($url, $headers);
         if (!is_string($response['body'])) {
-            throw new RuntimeException($response['error'] ?: 'Provider connection failed.');
+            throw new RuntimeException(
+                $providerName . ' connection failed: ' .
+                ($response['error'] ?: 'Provider connection failed.')
+            );
         }
         $decoded = json_decode($response['body'], true);
         if (!is_array($decoded)) {
@@ -589,7 +610,10 @@ class ExternalHazardService
                 $headers
             );
             if (!is_string($weather['body']) || !is_array(json_decode($weather['body'], true))) {
-                throw new RuntimeException($weather['error'] ?: 'Open-Meteo connection failed.');
+                throw new RuntimeException(
+                    'Open-Meteo connection failed: ' .
+                    ($weather['error'] ?: 'Provider returned an invalid response.')
+                );
             }
             return count($events);
         }
