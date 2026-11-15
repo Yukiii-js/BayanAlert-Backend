@@ -2,11 +2,10 @@
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 require_once __DIR__ . DIRECTORY_SEPARATOR . 'ExternalApiConfig.php';
+require_once __DIR__ . DIRECTORY_SEPARATOR . 'ExternalHazardService.php';
 
 class BrevoMailer
 {
-    private const API_URL = 'https://api.brevo.com/v3/smtp/email';
-
     private const DEPARTMENTS = [
         'DOH' => [
             'name' => 'Department of Health',
@@ -37,12 +36,14 @@ class BrevoMailer
             return ['success' => false, 'error' => 'Transactional email is disabled by an administrator.'];
         }
 
-        $apiKey = trim((string) getenv('BREVO_API_KEY'));
         $senderEmail = trim((string) getenv('BREVO_SENDER_EMAIL'));
         $senderName = trim((string) getenv('BREVO_SENDER_NAME'));
 
-        if ($apiKey === '' || !filter_var($senderEmail, FILTER_VALIDATE_EMAIL) || $senderName === '') {
-            error_log('Brevo email was not sent: BREVO_API_KEY, BREVO_SENDER_EMAIL, or BREVO_SENDER_NAME is not configured.');
+        $provider = new ExternalHazardService();
+        if (!$provider->hasProviderCredential('brevo')
+            || !filter_var($senderEmail, FILTER_VALIDATE_EMAIL)
+            || $senderName === '') {
+            error_log('Brevo email was not sent: an API credential, sender email, or sender name is not configured.');
             return ['success' => false, 'error' => 'Transactional email is not configured.'];
         }
 
@@ -68,46 +69,19 @@ class BrevoMailer
         }
 
         try {
-            $jsonPayload = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            error_log('Brevo email was not sent: message content could not be encoded.');
-            return ['success' => false, 'error' => 'Email content could not be prepared.'];
-        }
-
-        $curl = curl_init(self::API_URL);
-        if ($curl === false) {
-            error_log('Brevo email failed: unable to initialize cURL.');
-            return ['success' => false, 'error' => 'Email service is temporarily unavailable.'];
-        }
-
-        curl_setopt_array($curl, [
-            CURLOPT_POST => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 5,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_HTTPHEADER => [
-                'accept: application/json',
-                'api-key: ' . $apiKey,
-                'content-type: application/json',
-            ],
-            CURLOPT_POSTFIELDS => $jsonPayload,
-        ]);
-
-        $responseBody = curl_exec($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($curl);
-        curl_close($curl);
-
-        if (!is_string($responseBody) || $statusCode < 200 || $statusCode >= 300) {
-            error_log(
-                'Brevo email request failed: HTTP ' . $statusCode .
-                ($curlError !== '' ? ' (' . $curlError . ')' : '')
-            );
+            $response = $provider->requestConfiguredProvider('brevo', [], $payload);
+        } catch (Throwable $exception) {
+            error_log('Brevo email request failed: ' . $exception->getMessage());
             return ['success' => false, 'error' => 'Email could not be queued by the provider.'];
         }
 
-        $response = json_decode($responseBody, true);
-        $messageId = is_array($response) ? (string) ($response['messageId'] ?? '') : '';
+        if (!is_string($response['body']) || $response['status'] < 200 || $response['status'] >= 300) {
+            error_log('Brevo email request failed: HTTP ' . $response['status']);
+            return ['success' => false, 'error' => 'Email could not be queued by the provider.'];
+        }
+
+        $decodedResponse = json_decode($response['body'], true);
+        $messageId = is_array($decodedResponse) ? (string) ($decodedResponse['messageId'] ?? '') : '';
         error_log(
             'Brevo email queued successfully' .
             ($messageId !== '' ? ' (message ID ' . $messageId . ').' : '.')

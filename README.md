@@ -208,10 +208,25 @@ at `GET /api/admin/external-apis`, `POST /api/admin/external-apis/{key}/sync`, a
 `PATCH /api/admin/external-apis/{key}/config` allow health checks, manual sync triggers,
 and configuration updates without exposing the provider keys to the browser. The related
 migration `app/migrations/008_create_external_api_tables.php` creates the supporting tables.
-Apply that migration before using API Management or persisting external advisory notifications.
-Connection tests are run on demand. WeatherAPI and Brevo tests require `WEATHERAPI_KEY` and
-`BREVO_API_KEY` respectively; their keys remain on the backend. USGS and GDACS are public feeds
-and do not require API keys. The Leaflet map uses the clipped, WGS84 GeoJSON at
+Apply migration `004` first if the `notifications` table is missing, then migration `008`, and
+then `app/migrations/009_create_system_api_registry.php` before using the current API Management
+tab or persisting notification deep links. Migration `009` adds
+notification report/advisory targets, stores rate-limit reset timestamps, and creates the
+`system_apis` registry. The registry routes are under `/api/admin/system-apis`; they support
+listing, create/update, connection testing, cache/rate-limit reset, and deletion of custom entries.
+For a manual phpMyAdmin/MySQL alternative, select the BayanAlert database and run
+[`manual_migrations_004_008_009.sql`](./manual_migrations_004_008_009.sql) instead of applying
+those migrations separately. It creates the notifications table only if missing and can be re-run.
+Set a stable `APP_KEY` of at least 32 characters before saving API credentials: credentials in
+the registry are encrypted with AES-256-GCM and cannot be recovered if this key is changed.
+Edits to built-in endpoint, credential, authentication, and parameter settings are used by the
+backend's live weather, regional-hazard, and transactional-email requests, not only by the
+connection-test button. Brevo connection tests check account authentication without sending an email;
+email delivery uses the configured SMTP endpoint.
+Connection tests are run on demand. WeatherAPI and Brevo use credentials stored in API Management
+or the `WEATHERAPI_KEY` and `BREVO_API_KEY` backend environment variables; their keys remain
+server-side. USGS and GDACS are public feeds and do not require API keys. The Leaflet map uses the
+clipped, WGS84 GeoJSON at
 `BayanAlert-Frontend/public/data/calapan_barangays.geojson`, sourced from UN OCHA HDX's
 `cod-ab-phl` admin4 GeoJSON entry (`phl_admin4.geojson`, resource
 `0120c30e-ba8b-487d-83f5-a664eddd3a8e`). The full national archive is nearly 1 GB; only the
@@ -220,13 +235,18 @@ downloads the national archive. Preserve UN OCHA HDX attribution when updating t
 The map also serves `BayanAlert-Frontend/public/data/calapan_emergency_places.geojson`, a static
 OpenStreetMap snapshot filtered to points inside those Calapan barangay polygons. It is rendered
 alongside the HDX barangay boundaries by default, with independently toggleable layers; the
-source is © OpenStreetMap contributors under the ODbL.
-Update the bundled snapshot deliberately and retain its source/snapshot metadata when refreshing.
+source is © OpenStreetMap contributors under the ODbL. The map also queries Overpass for fire stations tagged
+with either `amenity=fire_station` or `emergency=fire_station` inside Calapan City's administrative
+area; if Overpass is unavailable, the bundled snapshot remains the fallback. Update the bundled
+snapshot deliberately and retain its source/snapshot metadata when refreshing.
 Hospitals, clinics, and police locations are mapped listings, not a guarantee of current operations.
 Schools and community facilities are shown only as **unverified possible evacuation sites** and
 must be confirmed with Calapan City DRRMO before anyone relies on them. The current snapshot has
 no OSM-tagged Calapan fire station or designated evacuation center; this does not establish that
-none exist in reality.
+none exist in reality. A separate BFP pin and its hotline, plus city-wide Tamaraw Fire Volunteer
+Brigade and Calapan City DRRMD/Public Safety Rescue & Fire Unit contacts, were supplied by the
+requester and are not independently verified. Only the BFP pin has a supplied map coordinate;
+the other contacts are shown as city-wide contacts rather than invented map locations.
 For production, set
 `APP_ENV=production` and set a random `APP_KEY` in the backend host's environment;
 the key is required for CSRF protection and must not be committed. Generate one

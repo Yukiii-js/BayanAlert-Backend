@@ -121,6 +121,12 @@ $router->patch('api/admin/external-apis/{key}/config', 'ExternalApiController::u
 $router->post('api/admin/external-apis/{key}/config', 'ExternalApiController::updateConfig');
 $router->patch('api/admin/external-events/{id}/visibility', 'ExternalApiController::toggleVisibility');
 $router->post('api/admin/external-events/{id}/visibility', 'ExternalApiController::toggleVisibility');
+$router->get('api/admin/system-apis', 'SystemApiController::index');
+$router->post('api/admin/system-apis', 'SystemApiController::create');
+$router->put('api/admin/system-apis/{id}', 'SystemApiController::update');
+$router->post('api/admin/system-apis/{id}/test', 'SystemApiController::test');
+$router->post('api/admin/system-apis/{id}/reset', 'SystemApiController::resetCache');
+$router->delete('api/admin/system-apis/{id}', 'SystemApiController::delete');
 $router->get('api/reports', 'Api_reports::index');
 $router->post('api/reports', 'Api_reports::store');
 $router->post('api/reports/{id}/vote', 'Api_reports::vote');

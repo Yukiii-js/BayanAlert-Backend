@@ -599,8 +599,8 @@ class Api_reports extends Controller
             $notificationWarning = '';
             try {
                 $adminNotifications = $this->db->raw(
-                    "INSERT INTO notifications (user_id, report_id, title, message, notification_type, is_read, created_at) " .
-                    "SELECT u.user_id, ?, 'New hazard report submitted', ?, 'new_report', 0, NOW() " .
+                    "INSERT INTO notifications (user_id, report_id, target_type, title, message, notification_type, is_read, created_at) " .
+                    "SELECT u.user_id, ?, 'report', 'New hazard report submitted', ?, 'new_report', 0, NOW() " .
                     "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
                     "WHERE r.role_name = 'admin' AND u.account_status = 'active'",
                     [

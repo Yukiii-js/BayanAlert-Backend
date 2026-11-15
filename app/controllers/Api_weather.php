@@ -2,6 +2,7 @@
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 require_once APP_DIR . 'libraries' . DIRECTORY_SEPARATOR . 'ExternalApiConfig.php';
+require_once APP_DIR . 'libraries' . DIRECTORY_SEPARATOR . 'ExternalHazardService.php';
 
 class Api_weather extends Controller
 {
@@ -19,43 +20,25 @@ class Api_weather extends Controller
             return;
         }
 
-        $apiKey = trim((string) getenv('WEATHERAPI_KEY'));
-        if ($apiKey === '') {
-            api_error('Weather forecast is not configured. Set WEATHERAPI_KEY in the backend environment.', 503);
+        $weatherService = new ExternalHazardService();
+        if (!$weatherService->hasProviderCredential('weatherapi')) {
+            api_error('Weather forecast is not configured. Set a WeatherAPI credential in API Management.', 503);
             return;
         }
 
-        $url = 'https://api.weatherapi.com/v1/forecast.json?' . http_build_query([
-            'key' => $apiKey,
+        $response = $weatherService->requestConfiguredProvider('weatherapi', [
             'q' => self::CALAPAN_QUERY,
             'days' => 3,
             'aqi' => 'no',
             'alerts' => 'no',
         ]);
-        $curl = curl_init($url);
-        if ($curl === false) {
-            error_log('Calapan weather error: unable to initialize cURL.');
+        if (!is_string($response['body'])) {
+            error_log('Calapan weather request failed: ' . ($response['error'] ?: 'Provider returned an invalid response.'));
             api_error('Weather forecast is temporarily unavailable.', 502);
             return;
         }
 
-        curl_setopt_array($curl, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 4,
-            CURLOPT_TIMEOUT => 8,
-            CURLOPT_USERAGENT => 'BayanAlert/1.0',
-        ]);
-        $responseBody = curl_exec($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($curl);
-
-        if (!is_string($responseBody) || $statusCode !== 200) {
-            error_log('Calapan weather request failed: HTTP ' . $statusCode . ($curlError ? ' ' . $curlError : ''));
-            api_error('Weather forecast is temporarily unavailable.', 502);
-            return;
-        }
-
-        $weather = json_decode($responseBody, true);
+        $weather = json_decode($response['body'], true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
             error_log(

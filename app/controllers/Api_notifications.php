@@ -32,10 +32,19 @@ class Api_notifications extends Controller
     {
         try {
             $notifications = $this->db->raw(
-                'SELECT notification_id, report_id, title, message, notification_type, is_read, created_at ' .
+                'SELECT notification_id, report_id, advisory_id, target_type, title, message, notification_type, is_read, created_at ' .
                 'FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
                 [$this->userId()]
             )->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($notifications as &$notification) {
+                if (!in_array($notification['target_type'], ['report', 'advisory'], true)) {
+                    $notification['target_type'] = !empty($notification['report_id'])
+                        ? 'report'
+                        : ($notification['notification_type'] === 'external_hazard' ? 'advisory' : null);
+                }
+            }
+            unset($notification);
 
             api_response(['notifications' => $notifications ?: []]);
         } catch (\Throwable $e) {
@@ -91,8 +100,8 @@ class Api_notifications extends Controller
 
         try {
             $insert = $this->db->raw(
-                "INSERT INTO notifications (user_id, title, message, notification_type, is_read, created_at) " .
-                "SELECT u.user_id, ?, ?, 'announcement', 0, NOW() " .
+                "INSERT INTO notifications (user_id, title, message, notification_type, target_type, is_read, created_at) " .
+                "SELECT u.user_id, ?, ?, 'announcement', NULL, 0, NOW() " .
                 "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
                 "WHERE r.role_name IN ('resident', 'user') AND u.account_status = 'active'",
                 [$title, $message]

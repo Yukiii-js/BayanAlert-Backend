@@ -15,6 +15,9 @@ class Api_map extends Controller
                 ->fetchAll(PDO::FETCH_COLUMN);
             $coordinatesAvailable = in_array('latitude', $columns, true)
                 && in_array('longitude', $columns, true);
+            $severityColumn = in_array('severity_level', $columns, true)
+                ? 'r.severity_level'
+                : 'NULL AS severity_level';
 
             $categories = $this->db->table('hazard_categories')
                 ->select('category_id, category_name')
@@ -24,7 +27,7 @@ class Api_map extends Controller
             $reports = [];
             if ($coordinatesAvailable) {
                 $reports = $this->db->raw(
-                    'SELECT r.category_id, r.status, r.latitude, r.longitude, c.category_name ' .
+                    'SELECT r.category_id, r.status, ' . $severityColumn . ', r.latitude, r.longitude, c.category_name ' .
                     'FROM hazard_reports r ' .
                     'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
                     'WHERE r.latitude BETWEEN 13.25 AND 13.55 ' .

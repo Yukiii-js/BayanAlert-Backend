@@ -218,11 +218,12 @@ class Api_admin extends Controller
                 && !empty($record['user_id'])) {
                 try {
                     $this->db->raw(
-                        'INSERT INTO notifications (user_id, report_id, title, message, notification_type, is_read, created_at) ' .
-                        'VALUES (?, ?, ?, ?, ?, 0, NOW())',
+                        'INSERT INTO notifications (user_id, report_id, target_type, title, message, notification_type, is_read, created_at) ' .
+                        'VALUES (?, ?, ?, ?, ?, ?, 0, NOW())',
                         [
                             (int) $record['user_id'],
                             (int) $record['report_id'],
+                            'report',
                             'Report status updated',
                             'Your report ' . ($record['reference_number'] ?: '#' . $record['report_id']) .
                                 ' is now ' . str_replace('_', ' ', strtolower((string) $validation['data']['status'])) . '.',
