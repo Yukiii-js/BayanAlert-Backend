@@ -387,14 +387,15 @@ CREATE TABLE email_verification_tokens (
 ```
 
 The verification endpoints create the required link-token tables on first use.
-The registration form's OTP flow requires `otp_verifications` to be provisioned
-before deployment. For an existing database, run
+The registration form's OTP flow requires the OTP and pre-registration
+verification tables to be provisioned before deployment. For an existing
+database, run
 [`manual_migration_013_otp_verifications.sql`](./manual_migration_013_otp_verifications.sql).
 The migration adds the email, expiration-use, and registration-code fields while
-retaining existing OTP records. The migration
+retaining existing OTP records, and creates the pre-registration verification
+state table if it is missing. Migration
 `app/migrations/007_create_registration_email_verifications.php` is also
-available for environments where the pre-registration verification state table
-must be provisioned before application requests. To provision it manually, run:
+available for environments that manage this table separately. Its manual SQL is:
 
 ```sql
 CREATE TABLE registration_email_verifications (

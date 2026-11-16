@@ -1,4 +1,4 @@
--- Add registration email OTP fields to the existing OTP register.
+-- Provision registration OTP storage and pre-registration verification state.
 -- Run against the BayanAlert database before deploying OTP registration.
 
 CREATE TABLE IF NOT EXISTS `otp_verifications` (
@@ -24,6 +24,19 @@ SET @bayanalert_sql = IF(
 PREPARE bayanalert_stmt FROM @bayanalert_sql;
 EXECUTE bayanalert_stmt;
 DEALLOCATE PREPARE bayanalert_stmt;
+
+CREATE TABLE IF NOT EXISTS `registration_email_verifications` (
+    `verification_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `email` VARCHAR(150) NOT NULL,
+    `token_hash` CHAR(64) NOT NULL,
+    `expires_at` DATETIME NOT NULL,
+    `verified_at` DATETIME NULL DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`verification_id`),
+    UNIQUE KEY `registration_email_verification_email_unique` (`email`),
+    UNIQUE KEY `registration_email_verification_token_unique` (`token_hash`),
+    KEY `registration_email_verification_expiry_idx` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET @bayanalert_sql = IF(
     (SELECT COUNT(*) FROM information_schema.COLUMNS

@@ -410,8 +410,9 @@ class Api_auth extends Controller {
         } catch (\Throwable $e) {
             error_log('Registration verification code request failed: ' . $e->getMessage());
             $message = stripos($e->getMessage(), 'otp_verifications') !== false
-                ? 'OTP verification storage is not ready. Apply manual_migration_013_otp_verifications.sql to the Render database.'
-                : 'Registration verification could not be completed. Check the database connection and Brevo configuration.';
+                || stripos($e->getMessage(), 'registration_email_verifications') !== false
+                ? 'Email verification tables are not ready. Apply manual_migration_013_otp_verifications.sql to the Aiven database.'
+                : 'Registration verification could not access the database. Check Aiven connectivity and backend logs.';
             api_error($message, 503);
         }
     }
@@ -482,8 +483,9 @@ class Api_auth extends Controller {
         } catch (\Throwable $e) {
             error_log('Registration OTP verification failed: ' . $e->getMessage());
             $message = stripos($e->getMessage(), 'otp_verifications') !== false
-                ? 'OTP verification storage is not ready. Apply manual_migration_013_otp_verifications.sql to the Render database.'
-                : 'Email verification could not be completed. Check the database connection and try again.';
+                || stripos($e->getMessage(), 'registration_email_verifications') !== false
+                ? 'Email verification tables are not ready. Apply manual_migration_013_otp_verifications.sql to the Aiven database.'
+                : 'Email verification could not access the database. Check Aiven connectivity and backend logs.';
             api_error($message, 503);
         }
     }
