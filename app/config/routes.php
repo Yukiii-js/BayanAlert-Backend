@@ -98,6 +98,7 @@ $router->post('api/categories/delete/{id}', 'Api_category::delete');
 // Resident Authentication API
 $router->post('api/auth/register', 'Api_auth::register');
 $router->post('api/auth/send-registration-verification', 'Api_auth::sendRegistrationVerification');
+$router->post('api/auth/verify-registration-otp', 'Api_auth::verifyRegistrationOtp');
 $router->post('api/auth/verify-email', 'Api_auth::verifyEmail');
 $router->post('api/auth/resend-verification', 'Api_auth::resendVerificationEmail');
 $router->post('api/auth/request-password-reset', 'Api_auth::requestPasswordReset');

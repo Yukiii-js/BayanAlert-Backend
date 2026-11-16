@@ -2,7 +2,7 @@
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 require_once __DIR__ . DIRECTORY_SEPARATOR . 'ExternalApiConfig.php';
-require_once __DIR__ . DIRECTORY_SEPARATOR . 'ExternalHazardService.php';
+require_once __DIR__ . DIRECTORY_SEPARATOR . 'SystemApiConfig.php';
 
 class BrevoMailer
 {
@@ -30,32 +30,34 @@ class BrevoMailer
      */
     public function sendEmail($recipientEmail, $recipientName, $subject, $htmlContent, $textContent = '')
     {
-        $lava = lava_instance();
-        if (!ExternalApiConfig::isEnabled($lava->db, 'brevo')) {
-            error_log('Brevo email was not sent: the integration is disabled in API Management.');
+        $settings = $this->resolveSettings();
+        if (!$settings['enabled']) {
+            $this->logError('Brevo email was not sent because the integration is disabled in API Management.');
             return ['success' => false, 'error' => 'Transactional email is disabled by an administrator.'];
         }
 
-        $senderEmail = trim((string) getenv('BREVO_SENDER_EMAIL'));
-        $senderName = trim((string) getenv('BREVO_SENDER_NAME'));
-
-        $provider = new ExternalHazardService();
-        if (!$provider->hasProviderCredential('brevo')
-            || !filter_var($senderEmail, FILTER_VALIDATE_EMAIL)
-            || $senderName === '') {
-            error_log('Brevo email was not sent: an API credential, sender email, or sender name is not configured.');
-            return ['success' => false, 'error' => 'Transactional email is not configured.'];
+        if ($settings['api_key'] === '') {
+            $this->logError('Brevo email was not sent: BREVO_API_KEY is not configured in system_apis or the environment.');
+            return ['success' => false, 'error' => 'Brevo API key is not configured. Add it in Admin API Management or set BREVO_API_KEY on Render.'];
+        }
+        if (preg_match('/[\r\n\x00]/', $settings['api_key'])) {
+            $this->logError('Brevo email was not sent: the configured API key contains invalid header characters.');
+            return ['success' => false, 'error' => 'Brevo API key configuration is invalid. Check the saved key or BREVO_API_KEY on Render.'];
+        }
+        if (!filter_var($settings['sender_email'], FILTER_VALIDATE_EMAIL) || $settings['sender_name'] === '') {
+            $this->logError('Brevo email was not sent: a valid sender email and sender name are required.');
+            return ['success' => false, 'error' => 'Brevo sender email or sender name is not configured. Set BREVO_SENDER_EMAIL and BREVO_SENDER_NAME on Render.'];
         }
 
         if (!filter_var($recipientEmail, FILTER_VALIDATE_EMAIL)) {
-            error_log('Brevo email was not sent: invalid recipient address.');
+            $this->logError('Brevo email was not sent: invalid recipient address.');
             return ['success' => false, 'error' => 'The email recipient is invalid.'];
         }
 
         $payload = [
             'sender' => [
-                'name' => $senderName,
-                'email' => $senderEmail,
+                'name' => $settings['sender_name'],
+                'email' => $settings['sender_email'],
             ],
             'to' => [[
                 'email' => $recipientEmail,
@@ -68,21 +70,46 @@ class BrevoMailer
             $payload['textContent'] = $textContent;
         }
 
-        try {
-            $response = $provider->requestConfiguredProvider('brevo', [], $payload);
-        } catch (Throwable $exception) {
-            error_log('Brevo email request failed: ' . $exception->getMessage());
-            return ['success' => false, 'error' => 'Email could not be queued by the provider.'];
+        $jsonPayload = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($jsonPayload)) {
+            $this->logError('Brevo email request failed: payload JSON encoding failed.');
+            return ['success' => false, 'error' => 'The verification email could not be prepared. Please try again.'];
         }
 
-        if (!is_string($response['body']) || $response['status'] < 200 || $response['status'] >= 300) {
-            error_log('Brevo email request failed: HTTP ' . $response['status']);
-            return ['success' => false, 'error' => 'Email could not be queued by the provider.'];
+        try {
+            $response = SystemApiConfig::request(
+                'https://api.brevo.com/v3/smtp/email',
+                [
+                    'Accept: application/json',
+                    'Content-Type: application/json',
+                    'api-key: ' . $settings['api_key'],
+                ],
+                15,
+                'POST',
+                $jsonPayload
+            );
+        } catch (Throwable $exception) {
+            $this->logError('Brevo HTTPS request failed: ' . $exception->getMessage());
+            return ['success' => false, 'error' => 'Brevo email service is temporarily unavailable. Check the backend HTTPS connection and try again.'];
+        }
+
+        if ($response['error'] !== null || !is_string($response['body'])
+            || $response['status'] < 200 || $response['status'] >= 300) {
+            $providerMessage = $this->providerErrorMessage($response['body']);
+            $this->logError(
+                'Brevo email request failed with HTTP ' . $response['status'] .
+                ($providerMessage !== '' ? ': ' . $providerMessage : '') .
+                ($response['error'] !== null ? ' (' . $response['error'] . ')' : '')
+            );
+            if (in_array((int) $response['status'], [400, 401, 403], true)) {
+                return ['success' => false, 'error' => 'Brevo rejected the email. Check the API key and verified sender email in Admin API Management or Render environment variables.'];
+            }
+            return ['success' => false, 'error' => 'Brevo email service is temporarily unavailable. Please try again.'];
         }
 
         $decodedResponse = json_decode($response['body'], true);
         $messageId = is_array($decodedResponse) ? (string) ($decodedResponse['messageId'] ?? '') : '';
-        error_log(
+        $this->logInfo(
             'Brevo email queued successfully' .
             ($messageId !== '' ? ' (message ID ' . $messageId . ').' : '.')
         );
@@ -91,6 +118,142 @@ class BrevoMailer
             'success' => true,
             'message_id' => $messageId,
         ];
+    }
+
+    public function sendRegistrationOtpEmail($email, $code)
+    {
+        $safeCode = $this->escape($code);
+        $html = '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.6">'
+            . '<h2>Verify your BayanAlert email</h2>'
+            . '<p>Enter this verification code on the registration page:</p>'
+            . '<p style="font-size:28px;font-weight:700;letter-spacing:8px">' . $safeCode . '</p>'
+            . '<p>This code expires in 10 minutes. If you did not request it, you can ignore this message.</p>'
+            . '</body></html>';
+
+        return $this->sendEmail(
+            $email,
+            $email,
+            'Your BayanAlert verification code',
+            $html,
+            "Your BayanAlert verification code is {$code}. It expires in 10 minutes."
+        );
+    }
+
+    private function resolveSettings()
+    {
+        $databaseSettings = [];
+        $enabled = null;
+        try {
+            $row = lava_instance()->db->raw(
+                'SELECT credential_encrypted, custom_parameters_json, is_enabled ' .
+                'FROM system_apis WHERE api_key = ? LIMIT 1',
+                ['brevo']
+            )->fetch(PDO::FETCH_ASSOC);
+            if ($row) {
+                $enabled = (int) $row['is_enabled'] === 1;
+                if ($enabled) {
+                    try {
+                        $databaseKey = SystemApiConfig::decryptSecret(
+                            $row['credential_encrypted'] ?? null
+                        );
+                        if ($databaseKey !== '') {
+                            $databaseSettings['api_key'] = $databaseKey;
+                        }
+                    } catch (Throwable $exception) {
+                        $this->logError('Unable to decrypt the Brevo API key from system_apis: ' . $exception->getMessage());
+                    }
+                    $parameters = json_decode((string) ($row['custom_parameters_json'] ?? '{}'), true);
+                    if (is_array($parameters)) {
+                        $senderEmail = trim((string) (
+                            $parameters['sender_email'] ?? $parameters['BREVO_SENDER_EMAIL'] ?? ''
+                        ));
+                        $senderName = trim((string) (
+                            $parameters['sender_name'] ?? $parameters['BREVO_SENDER_NAME'] ?? ''
+                        ));
+                        if ($senderEmail !== '') {
+                            $databaseSettings['sender_email'] = $senderEmail;
+                        }
+                        if ($senderName !== '') {
+                            $databaseSettings['sender_name'] = $senderName;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable $exception) {
+            $this->logError('Unable to load Brevo API Management settings; falling back to environment values: ' . $exception->getMessage());
+        }
+
+        $legacyEnabled = true;
+        try {
+            $legacyEnabled = ExternalApiConfig::isEnabled(lava_instance()->db, 'brevo');
+        } catch (Throwable $exception) {
+            $this->logError('Unable to load legacy Brevo enablement state: ' . $exception->getMessage());
+        }
+
+        return [
+            'enabled' => $enabled !== false && $legacyEnabled,
+            'api_key' => $databaseSettings['api_key'] ?? $this->environmentValue('BREVO_API_KEY'),
+            'sender_email' => $databaseSettings['sender_email'] ?? $this->environmentValue('BREVO_SENDER_EMAIL'),
+            'sender_name' => $databaseSettings['sender_name'] ?? $this->environmentValue('BREVO_SENDER_NAME'),
+        ];
+    }
+
+    private function environmentValue($name)
+    {
+        $value = getenv($name);
+        if (is_string($value) && trim($value) !== '') {
+            return trim($value);
+        }
+        $value = $_ENV[$name] ?? '';
+        return is_string($value) ? trim($value) : '';
+    }
+
+    private function providerErrorMessage($body)
+    {
+        if (!is_string($body) || $body === '') {
+            return '';
+        }
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) {
+            return substr(strip_tags($body), 0, 300);
+        }
+        $message = $decoded['message'] ?? $decoded['code'] ?? '';
+        if (is_array($message)) {
+            $message = implode('; ', array_map('strval', $message));
+        }
+        return substr(trim((string) $message), 0, 300);
+    }
+
+    private function logError($message)
+    {
+        if (function_exists('log_message')) {
+            log_message('error', $message);
+            return;
+        }
+        if (function_exists('load_class')) {
+            $logger = load_class('logger', 'kernel');
+            if (is_object($logger) && method_exists($logger, 'log')) {
+                $logger->log('error', 'BrevoMailer', $message, __FILE__, __LINE__);
+                return;
+            }
+        }
+        error_log($message);
+    }
+
+    private function logInfo($message)
+    {
+        if (function_exists('log_message')) {
+            log_message('info', $message);
+            return;
+        }
+        if (function_exists('load_class')) {
+            $logger = load_class('logger', 'kernel');
+            if (is_object($logger) && method_exists($logger, 'log')) {
+                $logger->log('debug', 'BrevoMailer', $message, __FILE__, __LINE__);
+                return;
+            }
+        }
+        error_log($message);
     }
 
     /**

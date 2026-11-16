@@ -349,19 +349,23 @@ CREATE TABLE report_community_votes (
 
 ### Brevo transactional email
 
-The backend sends a 24-hour email verification link after resident registration
-and sends approved hazard reports to the configured emergency department. The
-registration form can also request verification beside the email field before
-account creation. Registration remains available without email verification,
-but residents cannot sign in until they verify; administrator activation is a
-separate requirement. Copy
-`.env.example` to `.env` and set `BREVO_API_KEY` from your Brevo account, along
-with the sender identity and public frontend/backend URLs. Keep `.env` private;
-never put the Brevo key in the frontend or commit it. The sender email must be
-verified with Brevo. `FRONTEND_URL` is the frontend origin used in verification
-links, while `APP_BASE_URL` is the public backend origin used for evidence links.
-Brevo's successful API response confirms that a message was queued, not that it
-reached the recipient's inbox.
+The registration form's **Verify** action sends a six-digit code that expires
+after 10 minutes; codes are hashed in `otp_verifications`, and resend requests
+are limited to one per minute, with a five-attempt limit per code. After
+account creation, unverified residents can also receive the existing 24-hour
+verification link. Residents cannot sign in until verified; administrator
+activation is separate. Approved hazard reports are also emailed to their
+configured emergency department.
+
+Brevo is called over its HTTPS REST API (not SMTP). Configure the API key in
+Admin API Management or with `BREVO_API_KEY` on the backend, and configure
+`BREVO_SENDER_EMAIL` and `BREVO_SENDER_NAME` either in the Brevo API's custom
+parameters (`sender_email`, `sender_name`) or as backend environment variables.
+Database settings take precedence when present and enabled; environment values
+are fallbacks. Keep secrets out of the frontend and source control. The sender
+email must be verified with Brevo. `FRONTEND_URL` is used for post-registration
+verification links; `APP_BASE_URL` is used for evidence links. Brevo's successful
+response confirms a message was queued, not that it reached the inbox.
 
 Apply `app/migrations/006_create_email_verification_tokens.php` to an existing
 database, or run this SQL once in the selected database:
@@ -382,12 +386,15 @@ CREATE TABLE email_verification_tokens (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-The verification endpoints create the required token tables on first use, so
-the registration form's Verify button does not depend on migrations being
-enabled. The migration `app/migrations/007_create_registration_email_verifications.php`
-is also available for environments where database tables must be provisioned
-before application requests. This table stores short-lived hashed tokens for
-addresses that have not yet been registered. To provision it manually, run:
+The verification endpoints create the required link-token tables on first use.
+The registration form's OTP flow requires `otp_verifications` to be provisioned
+before deployment. For an existing database, run
+[`manual_migration_013_otp_verifications.sql`](./manual_migration_013_otp_verifications.sql).
+The migration adds the email, expiration-use, and registration-code fields while
+retaining existing OTP records. The migration
+`app/migrations/007_create_registration_email_verifications.php` is also
+available for environments where the pre-registration verification state table
+must be provisioned before application requests. To provision it manually, run:
 
 ```sql
 CREATE TABLE registration_email_verifications (
@@ -415,13 +422,11 @@ WHERE account_status = 'active'
   AND role_id IN (SELECT role_id FROM roles WHERE role_name IN ('resident', 'user'));
 ```
 
-Verification endpoints are `POST /api/auth/verify-email` with `{"token":"..."}`,
-`POST /api/auth/resend-verification` with `{"email":"..."}`, and
-`POST /api/auth/send-registration-verification` with `{"email":"..."}`.
-The Brevo integration uses `.env` defaults when the optional `system_apis`
-registry is not installed; set `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`,
-`BREVO_SENDER_NAME`, and the deployed frontend's `FRONTEND_URL`. The sender
-address must be verified with Brevo.
+Verification endpoints are `POST /api/auth/send-registration-verification`
+with `{"email":"..."}`, `POST /api/auth/verify-registration-otp` with
+`{"email":"...","code":"123456"}`, `POST /api/auth/verify-email` with `{"token":"..."}`,
+and `POST /api/auth/resend-verification` with `{"email":"..."}` for registered
+accounts. The sender address must be verified with Brevo.
 
 Resident sign-in provides a password-reset link for verified resident accounts.
 Reset tokens are stored hashed, expire after one hour, are single-use, and are

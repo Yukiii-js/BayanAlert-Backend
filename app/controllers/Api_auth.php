@@ -7,6 +7,7 @@ class Api_auth extends Controller {
     public function __construct() {
         parent::__construct();
         $this->call->model('Auth_model');
+        $this->call->model('OtpVerifications_model');
     }
 
     public function login() {
@@ -352,66 +353,138 @@ class Api_auth extends Controller {
 
         try {
             $user = $this->Auth_model->get_user_by_email($email);
-            if ($user && !empty($user['email_verified_at'])) {
-                api_response(['email_sent' => false], 200, 'This email address is already verified.');
-                return;
-            }
-
             if ($user) {
-                $this->ensureUserEmailVerificationTable();
-                $recentToken = $this->db->raw(
-                    'SELECT verification_id FROM email_verification_tokens ' .
-                    'WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) LIMIT 1',
-                    [(int) $user['user_id']]
-                )->fetch(\PDO::FETCH_ASSOC);
-                if ($recentToken) {
-                    api_response(['email_sent' => true], 200, 'A verification email was sent recently. Check your inbox.');
-                    return;
-                }
-
-                $result = $this->issueVerificationEmail(
-                    (int) $user['user_id'],
-                    $email,
-                    (string) $user['full_name']
-                );
-            } else {
-                $this->ensureRegistrationEmailVerificationTable();
-                $recentRequest = $this->db->raw(
-                    'SELECT verification_id FROM registration_email_verifications ' .
-                    'WHERE email = ? AND created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) LIMIT 1',
-                    [$email]
-                )->fetch(\PDO::FETCH_ASSOC);
-                if ($recentRequest) {
-                    api_response(['email_sent' => true], 200, 'A verification email was sent recently. Check your inbox.');
-                    return;
-                }
-
-                $token = bin2hex(random_bytes(32));
-                $this->db->raw(
-                    'INSERT INTO registration_email_verifications (email, token_hash, expires_at, verified_at, created_at) ' .
-                    'VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY), NULL, NOW()) ' .
-                    'ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), expires_at = VALUES(expires_at), ' .
-                    'verified_at = NULL, created_at = NOW()',
-                    [$email, hash('sha256', $token)]
-                );
-                $result = (new BrevoMailer())->sendVerificationEmail($email, '', $token);
-                if (!$result['success']) {
-                    $this->db->raw(
-                        'DELETE FROM registration_email_verifications WHERE email = ? AND token_hash = ?',
-                        [$email, hash('sha256', $token)]
-                    );
-                }
-            }
-
-            if (!$result['success']) {
-                api_error($result['error'] ?? 'Verification email could not be sent. Please try again later.', 503);
+                api_error('Email already registered. Sign in or use account recovery instead.', 409);
                 return;
             }
 
-            api_response(['email_sent' => true], 200, 'Verification link sent. Open it from your inbox before signing in.');
+            $this->ensureOtpVerificationTable();
+            $this->ensureRegistrationEmailVerificationTable();
+            $alreadyVerified = $this->db->raw(
+                'SELECT verification_id FROM registration_email_verifications ' .
+                'WHERE email = ? AND verified_at IS NOT NULL AND expires_at > NOW() LIMIT 1',
+                [$email]
+            )->fetch(\PDO::FETCH_ASSOC);
+            if ($alreadyVerified) {
+                api_response([
+                    'email_sent' => false,
+                    'email_verified' => true,
+                ], 200, 'This email address is already verified. You can continue creating your account.');
+                return;
+            }
+
+            $retryAfter = $this->OtpVerifications_model->registrationCooldownSeconds($email);
+            if ($retryAfter > 0) {
+                api_response([
+                    'email_sent' => false,
+                    'retry_after_seconds' => $retryAfter,
+                ], 200, 'A verification code was sent recently. You can request another code in ' . $retryAfter . ' seconds.');
+                return;
+            }
+
+            $code = (string) random_int(100000, 999999);
+            $expiresAt = gmdate('Y-m-d H:i:s', time() + 10 * 60);
+            $otpId = $this->OtpVerifications_model->createRegistrationCode(
+                $email,
+                password_hash($code, PASSWORD_DEFAULT),
+                $expiresAt
+            );
+            if (!$otpId) {
+                throw new \RuntimeException('The registration verification code could not be stored in otp_verifications.');
+            }
+            $result = (new BrevoMailer())->sendRegistrationOtpEmail($email, $code);
+            if (!$result['success']) {
+                $this->OtpVerifications_model->deleteRegistrationCode((int) $otpId);
+                api_error(
+                    $result['error'] ?? 'Verification email could not be sent. Please try again later.',
+                    503
+                );
+                return;
+            }
+
+            api_response([
+                'email_sent' => true,
+                'expires_in_seconds' => 600,
+                'retry_after_seconds' => 60,
+            ], 200, 'Verification code sent. Enter the 6-digit code from your inbox.');
         } catch (\Throwable $e) {
-            error_log('Registration verification email failed: ' . $e->getMessage());
-            api_error('Verification email service is temporarily unavailable. Please try again.', 503);
+            error_log('Registration verification code request failed: ' . $e->getMessage());
+            $message = stripos($e->getMessage(), 'otp_verifications') !== false
+                ? 'OTP verification storage is not ready. Apply manual_migration_013_otp_verifications.sql to the Render database.'
+                : 'Registration verification could not be completed. Check the database connection and Brevo configuration.';
+            api_error($message, 503);
+        }
+    }
+
+    public function verifyRegistrationOtp()
+    {
+        $input = get_request_input();
+        $email = isset($input['email']) && is_string($input['email'])
+            ? strtolower(trim($input['email']))
+            : '';
+        $code = isset($input['code']) && is_string($input['code'])
+            ? trim($input['code'])
+            : '';
+
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            api_error('Please enter a valid email address.', 400);
+            return;
+        }
+        if (!preg_match('/^[0-9]{6}$/', $code)) {
+            api_error('Enter the 6-digit verification code.', 400);
+            return;
+        }
+
+        try {
+            if ($this->Auth_model->get_user_by_email($email)) {
+                api_error('Email already registered. Sign in or use account recovery instead.', 409);
+                return;
+            }
+
+            $this->ensureOtpVerificationTable();
+            $this->ensureRegistrationEmailVerificationTable();
+            $verification = $this->OtpVerifications_model->getActiveRegistrationCode($email);
+            if (!$verification) {
+                api_error('The verification code is invalid or expired. Request a new code and try again.', 400);
+                return;
+            }
+            if (!password_verify($code, (string) $verification['code_hash'])) {
+                $this->OtpVerifications_model->recordRegistrationCodeFailure((int) $verification['otp_id']);
+                api_error('The verification code is invalid or expired. Request a new code and try again.', 400);
+                return;
+            }
+
+            $this->db->transaction();
+            try {
+                if (!$this->OtpVerifications_model->consumeRegistrationCode((int) $verification['otp_id'])) {
+                    $this->db->roll_back();
+                    api_error('The verification code is invalid or expired. Request a new code and try again.', 400);
+                    return;
+                }
+                $this->db->raw(
+                    'INSERT INTO registration_email_verifications ' .
+                    '(email, token_hash, expires_at, verified_at, created_at) ' .
+                    'VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY), NOW(), NOW()) ' .
+                    'ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), ' .
+                    'expires_at = VALUES(expires_at), verified_at = NOW(), created_at = NOW()',
+                    [$email, hash('sha256', random_bytes(32))]
+                );
+                $this->db->commit();
+            } catch (\Throwable $workflowError) {
+                $this->db->roll_back();
+                throw $workflowError;
+            }
+
+            api_response([
+                'email_verified' => true,
+                'email' => $email,
+            ], 200, 'Email verified successfully. You can continue creating your account.');
+        } catch (\Throwable $e) {
+            error_log('Registration OTP verification failed: ' . $e->getMessage());
+            $message = stripos($e->getMessage(), 'otp_verifications') !== false
+                ? 'OTP verification storage is not ready. Apply manual_migration_013_otp_verifications.sql to the Render database.'
+                : 'Email verification could not be completed. Check the database connection and try again.';
+            api_error($message, 503);
         }
     }
 
@@ -669,11 +742,29 @@ class Api_auth extends Controller {
         );
     }
 
+    private function ensureOtpVerificationTable()
+    {
+        if (!$this->tableExists('otp_verifications')) {
+            throw new \RuntimeException('The otp_verifications table is missing.');
+        }
+
+        $columns = $this->db->raw('SHOW COLUMNS FROM `otp_verifications`')
+            ->fetchAll(\PDO::FETCH_COLUMN);
+        $required = ['otp_id', 'user_id', 'email', 'code_hash', 'verification_type', 'expires_at', 'used_at', 'attempt_count', 'created_at'];
+        $missing = array_values(array_diff($required, $columns));
+        if ($missing) {
+            throw new \RuntimeException(
+                'otp_verifications is missing required columns: ' . implode(', ', $missing)
+            );
+        }
+    }
+
     private function ensureRegistrationEmailVerificationTable()
     {
         if ($this->tableExists('registration_email_verifications')) {
             return;
         }
+
         $this->db->raw(
             'CREATE TABLE IF NOT EXISTS registration_email_verifications (' .
             'verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,' .
