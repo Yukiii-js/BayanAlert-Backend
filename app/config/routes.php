@@ -73,6 +73,7 @@ $router->post('api/auth/logout', 'Api_auth::logout');
 $router->get('api/auth/me', 'Api_auth::me');
 
 $router->get('api/admin/dashboard', 'Api_admin::dashboard');
+$router->get('api/admin/barangays/incident-counts', 'Api_admin::barangay_incident_counts');
 $router->get('api/admin/tables', 'Api_admin::tables');
 $router->get('api/admin/tables/{table}', 'Api_admin::table');
 $router->get('api/admin/tables/{table}/options', 'Api_admin::options');

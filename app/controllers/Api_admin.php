@@ -45,6 +45,16 @@ class Api_admin extends Controller
         ]);
     }
 
+    public function barangay_incident_counts()
+    {
+        try {
+            api_response(['counts' => $this->Admin_model->get_barangay_incident_counts()]);
+        } catch (\Throwable $e) {
+            error_log('Admin barangay incident counts failed: ' . $e->getMessage());
+            api_error('Could not load barangay incident counts.', 500);
+        }
+    }
+
     public function table($table)
     {
         $info = $this->get_table_info($table);

@@ -353,9 +353,27 @@ class Admin_model extends Model
             }
         }
 
-        $activeUsers = !empty($availableTables['users'])
-            ? (int) $this->db->table('users')->where('account_status', 'active')->count()
-            : 0;
+        $userSummary = [
+            'active' => 0,
+            'suspended' => 0,
+            'verified_email' => 0
+        ];
+        if (!empty($availableTables['users'])) {
+            $summary = $this->db->raw(
+                'SELECT ' .
+                'SUM(CASE WHEN account_status = ? THEN 1 ELSE 0 END) AS active_accounts, ' .
+                'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS suspended_accounts, ' .
+                'SUM(CASE WHEN email_verified_at IS NOT NULL THEN 1 ELSE 0 END) AS verified_emails ' .
+                'FROM users',
+                ['active', 'suspended']
+            )->fetch(PDO::FETCH_ASSOC) ?: [];
+            $userSummary = [
+                'active' => (int) ($summary['active_accounts'] ?? 0),
+                'suspended' => (int) ($summary['suspended_accounts'] ?? 0),
+                'verified_email' => (int) ($summary['verified_emails'] ?? 0)
+            ];
+        }
+        $activeUsers = $userSummary['active'];
 
         return [
             'counts' => $counts,
@@ -363,11 +381,29 @@ class Admin_model extends Model
             'report_count' => $reportCount,
             'pending_reports' => $pendingReports,
             'active_users' => $activeUsers,
+            'user_summary' => $userSummary,
             'recent_reports' => $recentReports ?: [],
             'report_statuses' => $reportStatuses ?: [],
             'table_availability' => $availableTables,
             'unavailable_tables' => $unavailableTables
         ];
+    }
+
+    public function get_barangay_incident_counts()
+    {
+        $rows = $this->db->raw(
+            'SELECT users.barangay_id, COUNT(hazard_reports.report_id) AS incident_count ' .
+            'FROM users INNER JOIN hazard_reports ON hazard_reports.user_id = users.user_id ' .
+            'WHERE users.barangay_id IS NOT NULL ' .
+            'GROUP BY users.barangay_id'
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(string) $row['barangay_id']] = (int) $row['incident_count'];
+        }
+
+        return $counts;
     }
 
     private function table_exists($table)
