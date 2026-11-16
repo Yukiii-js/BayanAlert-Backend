@@ -351,6 +351,7 @@ class Api_auth extends Controller {
             return;
         }
 
+        $stage = 'email account lookup';
         try {
             $user = $this->Auth_model->get_user_by_email($email);
             if ($user) {
@@ -358,8 +359,10 @@ class Api_auth extends Controller {
                 return;
             }
 
+            $stage = 'verification table check';
             $this->ensureOtpVerificationTable();
             $this->ensureRegistrationEmailVerificationTable();
+            $stage = 'existing verification lookup';
             $alreadyVerified = $this->db->raw(
                 'SELECT verification_id FROM registration_email_verifications ' .
                 'WHERE email = ? AND verified_at IS NOT NULL AND expires_at > NOW() LIMIT 1',
@@ -373,6 +376,7 @@ class Api_auth extends Controller {
                 return;
             }
 
+            $stage = 'OTP resend limit check';
             $retryAfter = $this->OtpVerifications_model->registrationCooldownSeconds($email);
             if ($retryAfter > 0) {
                 api_response([
@@ -382,6 +386,7 @@ class Api_auth extends Controller {
                 return;
             }
 
+            $stage = 'OTP storage and email delivery';
             $code = (string) random_int(100000, 999999);
             $expiresAt = gmdate('Y-m-d H:i:s', time() + 10 * 60);
             $otpId = $this->OtpVerifications_model->createRegistrationCode(
@@ -408,11 +413,19 @@ class Api_auth extends Controller {
                 'retry_after_seconds' => 60,
             ], 200, 'Verification code sent. Enter the 6-digit code from your inbox.');
         } catch (\Throwable $e) {
-            error_log('Registration verification code request failed: ' . $e->getMessage());
+            $errorInfo = $e instanceof \PDOException && is_array($e->errorInfo ?? null)
+                ? $e->errorInfo
+                : [];
+            $sqlState = (string) ($errorInfo[0] ?? $e->getCode());
+            $driverCode = (int) ($errorInfo[1] ?? 0);
+            error_log(
+                'Registration verification code request failed during ' . $stage .
+                ' (SQLSTATE ' . $sqlState . ', driver ' . $driverCode . '): ' . $e->getMessage()
+            );
             $message = stripos($e->getMessage(), 'otp_verifications') !== false
                 || stripos($e->getMessage(), 'registration_email_verifications') !== false
                 ? 'Email verification tables are not ready. Apply manual_migration_013_otp_verifications.sql to the Aiven database.'
-                : 'Registration verification could not access the database. Check Aiven connectivity and backend logs.';
+                : $this->registrationDatabaseErrorMessage($stage, $sqlState, $driverCode);
             api_error($message, 503);
         }
     }
@@ -436,14 +449,17 @@ class Api_auth extends Controller {
             return;
         }
 
+        $stage = 'email account lookup';
         try {
             if ($this->Auth_model->get_user_by_email($email)) {
                 api_error('Email already registered. Sign in or use account recovery instead.', 409);
                 return;
             }
 
+            $stage = 'verification table check';
             $this->ensureOtpVerificationTable();
             $this->ensureRegistrationEmailVerificationTable();
+            $stage = 'OTP lookup and validation';
             $verification = $this->OtpVerifications_model->getActiveRegistrationCode($email);
             if (!$verification) {
                 api_error('The verification code is invalid or expired. Request a new code and try again.', 400);
@@ -455,6 +471,7 @@ class Api_auth extends Controller {
                 return;
             }
 
+            $stage = 'verification state update';
             $this->db->transaction();
             try {
                 if (!$this->OtpVerifications_model->consumeRegistrationCode((int) $verification['otp_id'])) {
@@ -481,11 +498,19 @@ class Api_auth extends Controller {
                 'email' => $email,
             ], 200, 'Email verified successfully. You can continue creating your account.');
         } catch (\Throwable $e) {
-            error_log('Registration OTP verification failed: ' . $e->getMessage());
+            $errorInfo = $e instanceof \PDOException && is_array($e->errorInfo ?? null)
+                ? $e->errorInfo
+                : [];
+            $sqlState = (string) ($errorInfo[0] ?? $e->getCode());
+            $driverCode = (int) ($errorInfo[1] ?? 0);
+            error_log(
+                'Registration OTP verification failed during ' . $stage .
+                ' (SQLSTATE ' . $sqlState . ', driver ' . $driverCode . '): ' . $e->getMessage()
+            );
             $message = stripos($e->getMessage(), 'otp_verifications') !== false
                 || stripos($e->getMessage(), 'registration_email_verifications') !== false
                 ? 'Email verification tables are not ready. Apply manual_migration_013_otp_verifications.sql to the Aiven database.'
-                : 'Email verification could not access the database. Check Aiven connectivity and backend logs.';
+                : $this->registrationDatabaseErrorMessage($stage, $sqlState, $driverCode);
             api_error($message, 503);
         }
     }
@@ -742,6 +767,24 @@ class Api_auth extends Controller {
             'REFERENCES users (user_id) ON DELETE CASCADE' .
             ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
         );
+    }
+
+    private function registrationDatabaseErrorMessage($stage, $sqlState, $driverCode)
+    {
+        if (in_array($driverCode, [2002, 2003, 2006, 2013], true)) {
+            return 'Cannot connect to Aiven during ' . $stage . '. Check Render DB_HOST, DB_PORT, Aiven network access, and DB_SSL_CA settings.';
+        }
+        if ($driverCode === 1045 || $sqlState === '28000') {
+            return 'Aiven rejected the database login during ' . $stage . '. Check Render DB_USER and DB_PASSWORD.';
+        }
+        if ($sqlState === '42S02' || $sqlState === '42S22') {
+            return 'The Aiven database schema is incomplete during ' . $stage . '. Check the users/roles tables and apply manual_migration_013_otp_verifications.sql.';
+        }
+
+        $diagnostic = $sqlState !== ''
+            ? ' (SQLSTATE ' . $sqlState . ($driverCode ? ', MySQL ' . $driverCode : '') . ')'
+            : '';
+        return 'Email verification failed during ' . $stage . $diagnostic . '. Check the Aiven database and backend logs.';
     }
 
     private function ensureOtpVerificationTable()
