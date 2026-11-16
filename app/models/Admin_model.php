@@ -119,7 +119,6 @@ class Admin_model extends Model
 
     private $schema_cache = [];
     private $table_model_cache = [];
-    private $user_moderation_schema_checked = false;
 
     private function table_model_name($table)
     {
@@ -161,9 +160,6 @@ class Admin_model extends Model
     public function get_schema($table)
     {
         $info = $this->get_table_info($table);
-        if ($table === 'users') {
-            $this->ensure_user_moderation_columns();
-        }
         if (isset($this->schema_cache[$table])) {
             return $this->schema_cache[$table];
         }
@@ -231,24 +227,6 @@ class Admin_model extends Model
         return $columns;
     }
 
-    private function ensure_user_moderation_columns()
-    {
-        if ($this->user_moderation_schema_checked) {
-            return;
-        }
-
-        $columns = get_table_column_names($this->db, 'users');
-        $required = ['warning_strikes', 'status', 'suspension_reason'];
-        $missing = array_values(array_diff($required, $columns));
-        if ($missing) {
-            throw new RuntimeException(
-                'Users moderation fields are missing. Apply app/migrations/017_add_user_moderation_columns.php.'
-            );
-        }
-
-        $this->user_moderation_schema_checked = true;
-    }
-
     public function get_column_names($table)
     {
         $names = [];
@@ -290,10 +268,6 @@ class Admin_model extends Model
                 $unavailableTables[] = $table;
             }
         }
-        if (!empty($availableTables['users'])) {
-            $this->ensure_user_moderation_columns();
-        }
-
         $reportCount = $counts['hazard_reports'] ?? 0;
         $pendingReports = 0;
         $reportStatuses = [];
@@ -383,10 +357,20 @@ class Admin_model extends Model
             'verified_email' => 0
         ];
         if (!empty($availableTables['users'])) {
+            $userColumns = get_table_column_names($this->db, 'users');
+            $statusColumn = in_array('status', $userColumns, true)
+                ? 'status'
+                : (in_array('account_status', $userColumns, true) ? 'account_status' : null);
             $userSummary = [
-                'active' => (int) $this->db->table('users')->where('account_status', 'active')->count(),
-                'suspended' => (int) $this->db->table('users')->where('status', 'suspended')->count(),
-                'verified_email' => (int) $this->db->table('users')->where_not_null('email_verified_at')->count(),
+                'active' => $statusColumn === null
+                    ? $counts['users']
+                    : (int) $this->db->table('users')->where($statusColumn, 'active')->count(),
+                'suspended' => $statusColumn === null
+                    ? 0
+                    : (int) $this->db->table('users')->where($statusColumn, 'suspended')->count(),
+                'verified_email' => in_array('email_verified_at', $userColumns, true)
+                    ? (int) $this->db->table('users')->where_not_null('email_verified_at')->count()
+                    : 0,
             ];
         }
         $activeUsers = $userSummary['active'];
@@ -488,6 +472,18 @@ class Admin_model extends Model
         $rows = $rowsQuery->order_by($table . '.' . $info['primary_key'], 'DESC')
             ->limit($pageSize, $offset)
             ->get_all();
+        if ($table === 'users') {
+            $displayColumns = array_values(array_unique(array_merge($displayColumns, [
+                'status',
+                'account_status',
+                'warning_strikes',
+                'suspension_reason',
+            ])));
+            foreach ($rows ?: [] as &$row) {
+                $row = $this->with_user_moderation_defaults($row);
+            }
+            unset($row);
+        }
         if ($table === 'hazard_reports') {
             $voteCounts = $this->get_report_vote_counts(
                 array_column($rows ?: [], 'report_id')
@@ -543,13 +539,14 @@ class Admin_model extends Model
             }, $this->get_column_names('users'));
             $columns[] = 'roles.role_name AS role_name';
             $columns[] = 'barangays.barangay_name AS barangay_name';
-            return $this->db->table('users')
+            $record = $this->db->table('users')
                 ->select(implode(', ', $columns))
                 ->left_join('roles', 'roles.role_id = users.role_id')
                 ->left_join('barangays', 'barangays.barangay_id = users.barangay_id')
                 ->where('users.user_id', (int) $id)
                 ->limit(1)
                 ->get();
+            return $record ? $this->with_user_moderation_defaults($record) : null;
         }
 
         $model = $this->get_table_model($table);
@@ -571,6 +568,24 @@ class Admin_model extends Model
         }
 
         return $record;
+    }
+
+    private function with_user_moderation_defaults(array $user)
+    {
+        if (!array_key_exists('status', $user) || trim((string) $user['status']) === '') {
+            $user['status'] = $user['account_status'] ?? 'active';
+        }
+        if (!array_key_exists('account_status', $user) || trim((string) $user['account_status']) === '') {
+            $user['account_status'] = $user['status'];
+        }
+        if (!array_key_exists('warning_strikes', $user) || $user['warning_strikes'] === null) {
+            $user['warning_strikes'] = 0;
+        }
+        if (!array_key_exists('suspension_reason', $user)) {
+            $user['suspension_reason'] = null;
+        }
+
+        return $user;
     }
 
     private function get_report_vote_counts(array $reportIds)

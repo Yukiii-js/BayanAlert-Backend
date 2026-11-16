@@ -137,6 +137,7 @@ $router->get('api/location-suggestions', 'Api_barangays::suggestions');
 $router->get('api/media/evidence/{filename}', 'Api_media::evidence');
 $router->get('api/weather/calapan', 'Api_weather::calapan')->middleware('rate_limit');
 $router->get('api/external/resident-feed', 'ExternalApiController::residentFeed')->middleware('rate_limit');
+$router->get('api/map/reports', 'Api_map::reports')->middleware('rate_limit');
 
 // Hazard categories and stations dropdowns
 $router->group([
@@ -147,7 +148,6 @@ $router->group([
     $router->post('notifications/{id}/read', 'Api_notifications::markRead');
     $router->get('reports/community', 'Api_reports::community');
     $router->get('reports/community-map', 'Api_reports::communityMap');
-    $router->get('map/reports', 'Api_map::reports');
     $router->get('reports', 'Api_reports::index');
     $router->post('reports', 'Api_reports::store');
     $router->post('reports/{id}/vote', 'Api_reports::vote');

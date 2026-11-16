@@ -244,8 +244,7 @@ class Api_reports extends Controller
             $reports = $this->db->table('hazard_reports')
             ->select(
                 $select .
-                'hazard_categories.category_name, stations.station_name, ' .
-                "COALESCE(NULLIF(users.full_name, ''), 'Deleted User') AS reporter_name"
+                'hazard_categories.category_name, stations.station_name, users.full_name AS reporter_name'
             )
             ->join(
                 'hazard_categories',
@@ -262,6 +261,11 @@ class Api_reports extends Controller
             ->where('hazard_reports.user_id', $this->userId())
             ->order_by('hazard_reports.submitted_at', 'DESC')
             ->get_all();
+
+            foreach ($reports as &$report) {
+                $report['reporter_name'] = trim((string) ($report['reporter_name'] ?? '')) ?: 'Deleted User';
+            }
+            unset($report);
 
             $this->attachAdminRemarks($reports);
             foreach ($reports as &$report) {

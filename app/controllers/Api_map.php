@@ -58,27 +58,32 @@ class Api_map extends Controller
                     ->limit(1000)
                     ->get_all();
 
-                $voteCounts = [];
-                if (database_table_exists($this->db, 'report_community_votes')) {
-                    $counts = $this->db->table('report_community_votes')
-                        ->select(
-                            "report_id, SUM(CASE WHEN vote = 'confirm' THEN 1 ELSE 0 END) AS confirm_count, " .
-                            "SUM(CASE WHEN vote = 'dispute' THEN 1 ELSE 0 END) AS dispute_count"
-                        )
-                        ->group_by('report_id')
-                        ->get_all();
-                    foreach ($counts as $count) {
-                        $voteCounts[(int) $count['report_id']] = [
-                            'confirm_count' => (int) $count['confirm_count'],
-                            'dispute_count' => (int) $count['dispute_count'],
-                        ];
-                    }
-                }
-
                 $reports = array_values(array_filter($reports, static function ($report) {
                     return strtolower((string) ($report['status'] ?? '')) !== 'resolved';
                 }));
                 $reports = array_slice($reports, 0, 500);
+                $reportIds = array_map(static function ($report) {
+                    return (int) $report['report_id'];
+                }, $reports);
+                $voteCounts = [];
+                if ($reportIds && database_table_exists($this->db, 'report_community_votes')) {
+                    $votes = $this->db->table('report_community_votes')
+                        ->select('report_id, vote')
+                        ->in('report_id', $reportIds)
+                        ->get_all();
+                    foreach ($votes ?: [] as $vote) {
+                        $reportId = (int) $vote['report_id'];
+                        $voteType = (string) $vote['vote'];
+                        if (!isset($voteCounts[$reportId])) {
+                            $voteCounts[$reportId] = ['confirm_count' => 0, 'dispute_count' => 0];
+                        }
+                        if ($voteType === 'confirm') {
+                            $voteCounts[$reportId]['confirm_count']++;
+                        } elseif ($voteType === 'dispute') {
+                            $voteCounts[$reportId]['dispute_count']++;
+                        }
+                    }
+                }
                 foreach ($reports as &$report) {
                     $report['severity_level'] = $report['severity_level'] ?? null;
                     $report['title'] = $report['title'] ?? '';
