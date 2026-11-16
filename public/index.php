@@ -78,6 +78,27 @@ define('SYSTEM_DIR', ROOT_DIR . $system_path . DIRECTORY_SEPARATOR);
 define('APP_DIR', ROOT_DIR . $application_folder . DIRECTORY_SEPARATOR);
 define('PUBLIC_DIR', $public_folder);
 
+require_once APP_DIR . 'middlewares/CorsMiddleware.php';
+$allowedOrigins = CorsMiddleware::allowedOrigins();
+
+$origin = filter_input(INPUT_SERVER, 'HTTP_ORIGIN') ?: '';
+if (in_array($origin, $allowedOrigins, true)) {
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Vary: Origin');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Accept, Content-Type, Authorization, X-Requested-With');
+    header('Access-Control-Expose-Headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After');
+    header('Access-Control-Max-Age: 600');
+}
+
+if (strtoupper((string) filter_input(INPUT_SERVER, 'REQUEST_METHOD')) === 'OPTIONS') {
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: DENY');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    http_response_code(204);
+    exit;
+}
+
 /*
  * ------------------------------------------------------
  * Setup done? Then Hurray!

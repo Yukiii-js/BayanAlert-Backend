@@ -9,6 +9,117 @@ class OtpVerifications_model extends Model
     protected $guarded = [];
     protected $timestamps = false;
 
+    public function registrationCooldownSeconds($email)
+    {
+        $latest = $this->db->table($this->table)
+            ->where('email', $email)
+            ->where('verification_type', 'registration')
+            ->order_by('created_at', 'DESC')
+            ->limit(1)
+            ->get();
+        if (!$latest || empty($latest['created_at'])) {
+            return 0;
+        }
+
+        $createdAt = strtotime((string) $latest['created_at'] . ' UTC');
+        return $createdAt === false
+            ? 0
+            : max(0, 60 - (time() - $createdAt));
+    }
+
+    public function createRegistrationCode($email, $codeHash, $expiresAt)
+    {
+        $this->db->table($this->table)
+            ->where('email', $email)
+            ->where('verification_type', 'registration')
+            ->update(['used_at' => gmdate('Y-m-d H:i:s')]);
+
+        $table = $this->db->table($this->table);
+        return $table->insert([
+            'user_id' => null,
+            'email' => $email,
+            'code_hash' => $codeHash,
+            'verification_type' => 'registration',
+            'expires_at' => $expiresAt,
+            'used_at' => null,
+            'attempt_count' => 0,
+            'created_at' => gmdate('Y-m-d H:i:s'),
+        ]);
+    }
+
+    public function getActiveRegistrationCode($email)
+    {
+        $record = $this->db->table($this->table)
+            ->where('email', $email)
+            ->where('verification_type', 'registration')
+            ->order_by('created_at', 'DESC')
+            ->limit(1)
+            ->get();
+
+        if (!$record || !empty($record['used_at']) || (int) ($record['attempt_count'] ?? 0) >= 5
+            || empty($record['expires_at'])
+            || strtotime((string) $record['expires_at'] . ' UTC') <= time()) {
+            return null;
+        }
+
+        return $record;
+    }
+
+    public function recordRegistrationCodeFailure($otpId)
+    {
+        $this->db->transaction();
+        try {
+            $updated = $this->db->table($this->table)
+                ->where('otp_id', (int) $otpId)
+                ->where('verification_type', 'registration')
+                ->where_null('used_at')
+                ->increment('attempt_count');
+            if ($updated < 1) {
+                $this->db->commit();
+                return 0;
+            }
+
+            $record = $this->db->table($this->table)
+                ->select('attempt_count')
+                ->where('otp_id', (int) $otpId)
+                ->where('verification_type', 'registration')
+                ->limit(1)
+                ->get();
+            if ($record && (int) ($record['attempt_count'] ?? 0) >= 5) {
+                $this->db->table($this->table)
+                    ->where('otp_id', (int) $otpId)
+                    ->where('verification_type', 'registration')
+                    ->where_null('used_at')
+                    ->update(['used_at' => gmdate('Y-m-d H:i:s')]);
+            }
+
+            $this->db->commit();
+            return $updated;
+        } catch (\Throwable $error) {
+            $this->db->roll_back();
+            throw $error;
+        }
+    }
+
+    public function consumeRegistrationCode($otpId)
+    {
+        $now = gmdate('Y-m-d H:i:s');
+        return $this->db->table($this->table)
+            ->where('otp_id', (int) $otpId)
+            ->where('verification_type', 'registration')
+            ->where_null('used_at')
+            ->where('expires_at', '>', $now)
+            ->update(['used_at' => $now]) === 1;
+    }
+
+    public function deleteRegistrationCode($otpId)
+    {
+        return $this->db->table($this->table)
+            ->where('otp_id', $otpId)
+            ->where('verification_type', 'registration')
+            ->delete();
+    }
+
     public function info()
     {
         return [
@@ -57,9 +168,6 @@ class OtpVerifications_model extends Model
 
     public function get_columns()
     {
-        $columns = $this->db->raw('SHOW COLUMNS FROM `' . $this->table . '`')->fetchAll(PDO::FETCH_ASSOC);
-        return array_map(static function ($column) {
-            return $column['Field'];
-        }, $columns);
+        return get_table_column_names($this->db, $this->table);
     }
 }

@@ -44,7 +44,7 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 | below (see their notes). The API library refuses to start otherwise.
 |
 */
-$config['api_helper_enabled'] = TRUE;
+$config['api_helper_enabled'] = FALSE;
 
 /*
 |--------------------------------------------------------------------------
@@ -121,7 +121,7 @@ $config['refresh_token_key'] = getenv('REFRESH_TOKEN_KEY') ?: '';
 | you perform your own server-side authorization checks.
 |
 */
-$config['jwt_verify_user'] = FALSE;
+$config['jwt_verify_user'] = TRUE;
 
 /*
 |--------------------------------------------------------------------------
@@ -134,6 +134,48 @@ $config['jwt_verify_user'] = FALSE;
 |
 */
 $config['users_table'] = 'users';
+
+/*
+|--------------------------------------------------------------------------
+| Access-Control-Allow-Origin
+|--------------------------------------------------------------------------
+|
+| Access-Control-Allow-Origin - change this to your domain if
+| already deployed. '*' allows any website to call your API from
+| a browser, so set your real domain in production.
+|
+*/
+$configuredOrigins = getenv('FRONTEND_ORIGINS');
+$allowedOrigins = [];
+if ($configuredOrigins) {
+    foreach (explode(',', $configuredOrigins) as $configuredOrigin) {
+        $configuredOrigin = trim($configuredOrigin);
+        $originParts = parse_url($configuredOrigin);
+        if (isset($originParts['scheme'], $originParts['host'])
+            && in_array(strtolower($originParts['scheme']), ['http', 'https'], true)
+            && !isset($originParts['user'])
+            && !isset($originParts['pass'])
+            && !isset($originParts['query'])
+            && !isset($originParts['fragment'])
+            && (!isset($originParts['path']) || $originParts['path'] === '' || $originParts['path'] === '/')) {
+            $allowedOrigins[] = $originParts['scheme'] . '://' . $originParts['host']
+                . (isset($originParts['port']) ? ':' . $originParts['port'] : '');
+        }
+    }
+}
+if (!$allowedOrigins) {
+    $allowedOrigins = ['https://bayanalert-frontend-2.onrender.com', 'http://localhost:5173', 'http://127.0.0.1:5173'];
+}
+$frontendUrl = getenv('FRONTEND_URL');
+if ($frontendUrl) {
+    $frontendOrigin = parse_url($frontendUrl);
+    if (isset($frontendOrigin['scheme'], $frontendOrigin['host'])
+        && in_array(strtolower($frontendOrigin['scheme']), ['http', 'https'], true)) {
+        $allowedOrigins[] = $frontendOrigin['scheme'] . '://' . $frontendOrigin['host']
+            . (isset($frontendOrigin['port']) ? ':' . $frontendOrigin['port'] : '');
+    }
+}
+$config['allow_origin'] = reset($allowedOrigins);
 
 /*
 |--------------------------------------------------------------------------

@@ -44,12 +44,15 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 */
 /** @var object $router **/
 
+$router->add_global_middleware('cors');
+
 $router->get('/', 'Auth::login');
 $router->get('auth/login', 'Auth::login');
 $router->post('auth/authenticate', 'Auth::authenticate');
 $router->post('auth/logout', 'Auth::logout');
 
 $router->get('admin', 'Admin::index');
+$router->get('admin/reports/hazards', 'AdminReportController::hazard_pdf');
 $router->get('admin/tables/{table}', 'Admin::table');
 $router->get('admin/tables/{table}/create', 'Admin::create');
 $router->post('admin/tables/{table}/store', 'Admin::store');
@@ -64,49 +67,93 @@ $router->get('category/edit/{id}', 'Category::edit');
 $router->post('category/update/{id}', 'Category::update');
 $router->post('category/delete/{id}', 'Category::delete');
 
-$router->post('api/auth/login', 'Api_auth::login');
 $router->post('api/auth/logout', 'Api_auth::logout');
-$router->get('api/auth/me', 'Api_auth::me');
+$router->get('api/auth/me', 'Api_auth::me')->middleware(['rate_limit', 'auth', 'active_account']);
 
-$router->get('api/admin/dashboard', 'Api_admin::dashboard');
-$router->get('api/admin/tables', 'Api_admin::tables');
-$router->get('api/admin/tables/{table}', 'Api_admin::table');
-$router->get('api/admin/tables/{table}/options', 'Api_admin::options');
-$router->get('api/admin/tables/{table}/{id}', 'Api_admin::show');
-$router->post('api/admin/tables/{table}', 'Api_admin::store');
-$router->put('api/admin/tables/{table}/{id}', 'Api_admin::update');
-$router->post('api/admin/tables/{table}/update/{id}', 'Api_admin::update');
-$router->delete('api/admin/tables/{table}/{id}', 'Api_admin::delete');
-$router->post('api/admin/tables/{table}/delete/{id}', 'Api_admin::delete');
+$router->group([
+    'prefix' => 'api/admin',
+    'middleware' => ['rate_limit', 'auth', 'active_account', 'admin'],
+], function ($router) {
+    $router->get('reports/hazards', 'AdminReportController::hazard_pdf');
+    $router->get('reports/options', 'AdminReportController::report_options');
+    $router->get('reports', 'AdminReportController::report_pdf');
+    $router->get('dashboard', 'Api_admin::dashboard');
+    $router->get('barangays/incident-counts', 'Api_admin::barangay_incident_counts');
+    $router->get('tables', 'Api_admin::tables');
+    $router->get('tables/{table}', 'Api_admin::table');
+    $router->get('tables/{table}/options', 'Api_admin::options');
+    $router->get('tables/{table}/{id}', 'Api_admin::show');
+    $router->post('tables/{table}', 'Api_admin::store');
+    $router->put('tables/{table}/{id}', 'Api_admin::update');
+    $router->post('tables/{table}/update/{id}', 'Api_admin::update');
+    $router->delete('tables/{table}/{id}', 'Api_admin::delete');
+    $router->post('tables/{table}/delete/{id}', 'Api_admin::delete');
+    $router->post('announcements', 'Api_notifications::announce');
+    $router->post('users/{id}/warning-strike', 'Api_admin_moderation::issueWarningStrike');
+    $router->post('users/{id}/suspension', 'Api_admin_moderation::setSuspension');
+    $router->post('reports/{id}/resolve', 'Api_admin_moderation::resolveReport');
+    $router->get('external-apis', 'ExternalApiController::adminApis');
+    $router->post('external-apis/{key}/sync', 'ExternalApiController::syncApi');
+    $router->patch('external-apis/{key}/config', 'ExternalApiController::updateConfig');
+    $router->post('external-apis/{key}/config', 'ExternalApiController::updateConfig');
+    $router->patch('external-events/{id}/visibility', 'ExternalApiController::toggleVisibility');
+    $router->post('external-events/{id}/visibility', 'ExternalApiController::toggleVisibility');
+    $router->get('system-apis', 'SystemApiController::index');
+    $router->post('system-apis', 'SystemApiController::create');
+    $router->put('system-apis/{id}', 'SystemApiController::update');
+    $router->post('system-apis/{id}/test', 'SystemApiController::test');
+    $router->post('system-apis/{id}/reset', 'SystemApiController::resetCache');
+    $router->delete('system-apis/{id}', 'SystemApiController::delete');
+});
 
 $router->get('api/categories', 'Api_category::index');
 $router->get('api/categories/{id}', 'Api_category::show');
-$router->post('api/categories', 'Api_category::store');
-$router->put('api/categories/{id}', 'Api_category::update');
-$router->post('api/categories/update/{id}', 'Api_category::update');
-$router->delete('api/categories/{id}', 'Api_category::delete');
-$router->post('api/categories/delete/{id}', 'Api_category::delete');
+$router->post('api/categories', 'Api_category::store')->middleware(['rate_limit', 'auth', 'active_account', 'admin']);
+$router->put('api/categories/{id}', 'Api_category::update')->middleware(['rate_limit', 'auth', 'active_account', 'admin']);
+$router->post('api/categories/update/{id}', 'Api_category::update')->middleware(['rate_limit', 'auth', 'active_account', 'admin']);
+$router->delete('api/categories/{id}', 'Api_category::delete')->middleware(['rate_limit', 'auth', 'active_account', 'admin']);
+$router->post('api/categories/delete/{id}', 'Api_category::delete')->middleware(['rate_limit', 'auth', 'active_account', 'admin']);
 
 
 
 
 
 // Resident Authentication API
-$router->post('api/auth/register', 'Api_auth::register');
+$router->post('api/auth/login', 'Api_auth::login')->middleware('rate_limit');
+$router->post('api/auth/register', 'Api_auth::register')->middleware('rate_limit');
+$router->post('api/auth/send-registration-verification', 'Api_auth::sendRegistrationVerification')->middleware('rate_limit');
+$router->post('api/auth/verify-registration-otp', 'Api_auth::verifyRegistrationOtp')->middleware('rate_limit');
+$router->post('api/auth/verify-email', 'Api_auth::verifyEmail')->middleware('rate_limit');
+$router->post('api/auth/resend-verification', 'Api_auth::resendVerificationEmail')->middleware('rate_limit');
+$router->post('api/auth/request-password-reset', 'Api_auth::requestPasswordReset')->middleware('rate_limit');
+$router->post('api/auth/reset-password', 'Api_auth::resetPassword')->middleware('rate_limit');
 
 // Barangay dropdown API
 $router->get('api/barangays', 'Api_barangays::index');
+$router->get('api/location-suggestions', 'Api_barangays::suggestions');
 
 
 // Resident Reports API
-$router->get('api/reports/community', 'Api_reports::community');
-$router->get('api/map/reports', 'Api_map::reports');
-$router->get('api/reports', 'Api_reports::index');
-$router->post('api/reports', 'Api_reports::store');
-$router->get('api/reports/{id}', 'Api_reports::show');
-$router->put('api/reports/{id}', 'Api_reports::update');
-$router->post('api/reports/update/{id}', 'Api_reports::update');
+$router->get('api/media/evidence/{filename}', 'Api_media::evidence');
+$router->get('api/weather/calapan', 'Api_weather::calapan')->middleware('rate_limit');
+$router->get('api/external/resident-feed', 'ExternalApiController::residentFeed')->middleware('rate_limit');
+$router->get('api/map/reports', 'Api_map::reports')->middleware('rate_limit');
 
 // Hazard categories and stations dropdowns
-$router->get('api/hazard-categories', 'Api_reports::categories');
-$router->get('api/stations', 'Api_reports::stations');
+$router->group([
+    'prefix' => 'api',
+    'middleware' => ['rate_limit', 'auth', 'active_account'],
+], function ($router) {
+    $router->get('notifications', 'Api_notifications::index');
+    $router->post('notifications/{id}/read', 'Api_notifications::markRead');
+    $router->get('reports/community', 'Api_reports::community');
+    $router->get('reports/community-map', 'Api_reports::communityMap');
+    $router->get('reports', 'Api_reports::index');
+    $router->post('reports', 'Api_reports::store');
+    $router->post('reports/{id}/vote', 'Api_reports::vote');
+    $router->get('reports/{id}', 'Api_reports::show');
+    $router->put('reports/{id}', 'Api_reports::update');
+    $router->post('reports/update/{id}', 'Api_reports::update');
+    $router->get('hazard-categories', 'Api_reports::categories');
+    $router->get('stations', 'Api_reports::stations');
+});

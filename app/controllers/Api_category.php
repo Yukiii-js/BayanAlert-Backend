@@ -37,6 +37,9 @@ class Api_category extends Controller {
 
     public function store() {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'category_name' => 'required',
+        ]);
         $categoryName = isset($input['category_name']) && is_string($input['category_name'])
             ? trim($input['category_name'])
             : '';
@@ -73,6 +76,9 @@ class Api_category extends Controller {
         }
 
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'category_name' => 'required',
+        ]);
         $categoryName = isset($input['category_name']) && is_string($input['category_name'])
             ? trim($input['category_name'])
             : '';

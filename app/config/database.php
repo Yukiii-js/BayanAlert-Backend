@@ -59,12 +59,13 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 $database['main'] = array(
     'driver' => getenv('DB_DRIVER') ?: '',
-    'hostname' => getenv('DB_HOST') ?: 'localhost',
+    'hostname' => getenv('DB_HOST') ?: '',
     'port' => getenv('DB_PORT') ?: '',
-    'username' => getenv('DB_USER') ?: 'root',
+    'username' => getenv('DB_USERNAME') ?: (getenv('DB_USER') ?: ''),
     'password' => getenv('DB_PASSWORD') ?: '',
-    'database' => getenv('DB_NAME') ?: 'bayanalert_db',
+    'database' => getenv('DB_NAME') ?: '',
     'charset' => getenv('DB_CHARSET') ?: '',
+    'ssl_ca' => getenv('DB_SSL_CA') ?: '',
     'dbprefix' => getenv('DB_PREFIX') ?: '',
     // Optional for SQLite
     'path' => ''

@@ -3,14 +3,6 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 if (!function_exists('api_response')) {
     function api_response($data = null, $status = 200, $message = 'Success') {
-        if (!headers_sent()) {
-            header('Content-Type: application/json; charset=utf-8');
-            header('Access-Control-Allow-Origin: *');
-            header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-            header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, Accept');
-            http_response_code($status);
-        }
-
         $payload = [
             'success' => $status >= 200 && $status < 300,
             'message' => $message
@@ -20,55 +12,58 @@ if (!function_exists('api_response')) {
             $payload['data'] = $data;
         }
 
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $response = load_class('response', 'kernel');
+        $response->send_json($payload, $status, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         exit;
     }
 }
 
 if (!function_exists('api_error')) {
     function api_error($message = 'An error occurred', $status = 400, $extra = []) {
-        if (!headers_sent()) {
-            header('Content-Type: application/json; charset=utf-8');
-            header('Access-Control-Allow-Origin: *');
-            header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-            header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, Accept');
-            http_response_code($status);
-        }
-
         $payload = array_merge([
             'success' => false,
             'error'   => $message,
             'message' => $message
         ], $extra);
 
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $response = load_class('response', 'kernel');
+        $response->send_json($payload, $status, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         exit;
+    }
+}
+
+if (!function_exists('api_validate_input')) {
+    function api_validate_input(array $input, array $fields) {
+        $validator = load_class('form_validation', 'libraries');
+        $validator->set_data($input);
+
+        if (!$validator->validate($fields)) {
+            api_error('Validation failed.', 422, [
+                'errors' => $validator->get_errors(),
+            ]);
+        }
     }
 }
 
 if (!function_exists('get_request_input')) {
     function get_request_input() {
-        $raw = file_get_contents('php://input');
-        if (!empty($raw)) {
-            $json = json_decode($raw, true);
-            if (is_array($json)) {
-                return $json;
-            }
+        $request = load_class('request', 'kernel');
+        $json = $request->json();
+        if (is_array($json)) {
+            return $json;
         }
-        return $_POST ?? [];
+
+        return $request->post();
     }
 }
 
 if (!function_exists('get_auth_bearer_token')) {
     function get_auth_bearer_token() {
-        $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+        $request = load_class('request', 'kernel');
+        $header = $request->header('Authorization')
+            ?: $request->server('REDIRECT_HTTP_AUTHORIZATION');
 
-        if (!$header && function_exists('apache_request_headers')) {
-            $headers = apache_request_headers();
-            $header = $headers['Authorization'] ?? $headers['authorization'] ?? '';
-        }
-
-        if (preg_match('/Bearer\s(\S+)/i', $header, $matches)) {
+        if (preg_match('/Bearer\s(\S+)/i', (string) $header, $matches)) {
             return $matches[1];
         }
 
@@ -78,10 +73,11 @@ if (!function_exists('get_auth_bearer_token')) {
 
 if (!function_exists('get_jwt_secret_key')) {
     function get_jwt_secret_key() {
-        $secret = getenv('JWT_SECRET') ?: config_item('jwt_secret');
-        if (!$secret) {
-            $secret = getenv('APP_KEY') ?: 'bayanalert-super-secure-jwt-secret-key-32chars!';
+        $secret = trim((string) (getenv('JWT_SECRET') ?: config_item('jwt_secret')));
+        if (strlen($secret) < 32) {
+            throw new RuntimeException('JWT_SECRET must be configured with at least 32 characters.');
         }
+
         return $secret;
     }
 }
@@ -158,7 +154,13 @@ if (!function_exists('require_api_auth')) {
             api_error('Authentication token required.', 401);
         }
 
-        $payload = verify_jwt_token($token);
+        try {
+            $payload = verify_jwt_token($token);
+        } catch (RuntimeException $e) {
+            error_log('JWT authentication is unavailable: ' . $e->getMessage());
+            api_error('Authentication service is unavailable.', 503);
+        }
+
         if (!$payload) {
             api_error('Invalid or expired authentication token.', 401);
         }

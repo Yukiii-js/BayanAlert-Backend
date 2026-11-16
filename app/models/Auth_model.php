@@ -6,18 +6,49 @@ class Auth_model extends Model {
     protected $table = 'users';
     protected $primary_key = 'user_id';
 
-    public function get_user_by_email_or_username($login) {
+    
+    public function get_user_by_email_or_username($login)
+    {
+        $columns = get_table_column_names($this->db, $this->table);
+        $statusColumn = in_array('status', $columns, true)
+            ? 'users.status'
+            : 'NULL AS status';
+        $suspensionColumn = in_array('suspension_reason', $columns, true)
+            ? 'users.suspension_reason'
+            : 'NULL AS suspension_reason';
+
         return $this->db->table($this->table)
-                        ->join('roles', 'roles.role_id = users.role_id')
-                        ->select('users.user_id, users.role_id, users.full_name, users.password_hash, users.account_status, roles.role_name')
-                        ->where('users.email', $login)
-                        ->or_where('users.username', $login)
-                        ->get();
+            ->join('roles', 'roles.role_id = users.role_id')
+            ->select(
+                'users.user_id, users.role_id, users.full_name, users.password_hash, ' .
+                'users.account_status, ' . $statusColumn . ', ' . $suspensionColumn . ', ' .
+                'users.email_verified_at, roles.role_name'
+            )
+            ->where('LOWER(users.email)', strtolower($login))
+            ->or_where('LOWER(users.username)', strtolower($login))
+            ->limit(1)
+            ->get();
+    }
+
+
+    public function verify_password($password, $storedHash) {
+        if (!is_string($password) || $password === ''
+            || !is_string($storedHash) || $storedHash === '') {
+            return false;
+        }
+
+        return password_verify($password, $storedHash);
     }
 
     public function get_user_by_email($email) {
         return $this->db->table($this->table)
-                        ->where('email', $email)
+                        ->join('roles', 'roles.role_id = users.role_id')
+                        ->select(
+                            'users.user_id, users.role_id, users.full_name, users.email, ' .
+                            'users.account_status, users.email_verified_at, users.status, ' .
+                            'users.suspension_reason, roles.role_name'
+                        )
+                        ->where('users.email', $email)
                         ->get();
     }
 
@@ -55,7 +86,7 @@ class Auth_model extends Model {
 
     public function get_active_barangays() {
         return $this->db->table('barangays')
-                        ->select('barangay_id, barangay_name')
+                        ->select('barangay_id, barangay_name, latitude, longitude')
                         ->where('is_active', 1)
                         ->get_all();
     }
