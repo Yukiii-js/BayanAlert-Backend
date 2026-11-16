@@ -668,7 +668,8 @@ class Admin_model extends Model
 
         $report = $this->db->raw(
             'SELECT r.report_id, r.reference_number, r.title, r.description, r.address_details, r.status, ' .
-            'r.submitted_at, c.category_name, u.full_name AS reporter_name, ' .
+            'r.submitted_at, c.category_name, ' .
+            "COALESCE(NULLIF(u.full_name, ''), 'Deleted User') AS reporter_name, " .
             implode(', ', $coordinates) . ', ' . $severity . ' ' .
             'FROM hazard_reports r ' .
             'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
@@ -991,8 +992,152 @@ class Admin_model extends Model
         );
     }
 
+    public function delete_user_safely($userId)
+    {
+        $userId = (int) $userId;
+        $user = $this->db->table('users')
+            ->select('user_id, email')
+            ->where('user_id', $userId)
+            ->get(PDO::FETCH_ASSOC);
+        if (!$user) {
+            return 0;
+        }
+
+        $this->db->transaction();
+        try {
+            foreach ([
+                ['notifications', 'user_id'],
+                ['otp_verifications', 'user_id'],
+                ['email_verification_tokens', 'user_id'],
+                ['password_reset_tokens', 'user_id']
+            ] as $reference) {
+                $this->delete_user_reference_rows($reference[0], $reference[1], $userId);
+            }
+
+            if (!empty($user['email'])) {
+                $this->delete_user_reference_rows('otp_verifications', 'email', $user['email']);
+                $this->delete_user_reference_rows(
+                    'registration_email_verifications',
+                    'email',
+                    $user['email']
+                );
+            }
+
+            $historicalReferences = [
+                'hazard_reports' => ['user_id'],
+                'report_verifications' => ['verified_by', 'verifier_id', 'user_id'],
+                'report_assignments' => ['assigned_by', 'assigned_to'],
+                'resolutions' => ['resolved_by', 'confirmed_by', 'user_id'],
+                'report_status_history' => ['changed_by', 'user_id'],
+                'report_evidence' => ['uploaded_by'],
+                'duplicate_report_checks' => ['checked_by'],
+                'report_community_votes' => ['user_id']
+            ];
+            $references = [];
+
+            foreach ($historicalReferences as $table => $columns) {
+                foreach ($columns as $column) {
+                    $metadata = $this->get_user_reference_column($table, $column);
+                    if ($metadata) {
+                        $references[$table . '.' . $column] = $metadata;
+                    }
+                }
+            }
+
+            $foreignKeys = $this->db->raw(
+                'SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME, c.IS_NULLABLE ' .
+                'FROM information_schema.KEY_COLUMN_USAGE AS kcu ' .
+                'INNER JOIN information_schema.COLUMNS AS c ' .
+                'ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA ' .
+                'AND c.TABLE_NAME = kcu.TABLE_NAME ' .
+                'AND c.COLUMN_NAME = kcu.COLUMN_NAME ' .
+                'WHERE kcu.TABLE_SCHEMA = DATABASE() ' .
+                'AND kcu.REFERENCED_TABLE_NAME = ? ' .
+                'AND kcu.REFERENCED_COLUMN_NAME = ?',
+                ['users', 'user_id']
+            )->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($foreignKeys as $foreignKey) {
+                $table = $foreignKey['TABLE_NAME'];
+                $column = $foreignKey['COLUMN_NAME'];
+                if (in_array($table, [
+                    'notifications',
+                    'otp_verifications',
+                    'email_verification_tokens',
+                    'password_reset_tokens'
+                ], true)) {
+                    continue;
+                }
+                $references[$table . '.' . $column] = [
+                    'table' => $table,
+                    'column' => $column,
+                    'nullable' => $foreignKey['IS_NULLABLE'] === 'YES'
+                ];
+            }
+
+            foreach ($references as $reference) {
+                if (!$reference['nullable']) {
+                    throw new RuntimeException(
+                        'User deletion is blocked because ' . $reference['table'] . '.' .
+                        $reference['column'] . ' is not nullable. Run the user-history foreign-key migration first.'
+                    );
+                }
+
+                $this->db->table($reference['table'])
+                    ->where($reference['column'], $userId)
+                    ->update([$reference['column'] => null]);
+            }
+
+            $deleted = $this->db->table('users')
+                ->where('user_id', $userId)
+                ->delete();
+            $this->db->commit();
+
+            return $deleted;
+        } catch (\Throwable $e) {
+            $this->db->roll_back();
+            throw $e;
+        }
+    }
+
+    private function delete_user_reference_rows($table, $column, $value)
+    {
+        $metadata = $this->get_user_reference_column($table, $column);
+        if (!$metadata) {
+            return;
+        }
+
+        $this->db->table($table)
+            ->where($column, $value)
+            ->delete();
+    }
+
+    private function get_user_reference_column($table, $column)
+    {
+        $metadata = $this->db->raw(
+            'SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE ' .
+            'FROM information_schema.COLUMNS ' .
+            'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1',
+            [$table, $column]
+        )->fetch(PDO::FETCH_ASSOC);
+
+        if (!$metadata) {
+            return null;
+        }
+
+        return [
+            'table' => $metadata['TABLE_NAME'],
+            'column' => $metadata['COLUMN_NAME'],
+            'nullable' => $metadata['IS_NULLABLE'] === 'YES'
+        ];
+    }
+
     public function delete_record($table, $id)
     {
+        if ($table === 'users') {
+            return $this->delete_user_safely($id);
+        }
+
         $info = $this->get_table_info($table);
         return $this->db->table($table)
             ->where($info['primary_key'], $id)

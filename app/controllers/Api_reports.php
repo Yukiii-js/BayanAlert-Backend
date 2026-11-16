@@ -230,7 +230,7 @@ class Api_reports extends Controller
     public function index()
     {
         try {
-            $select = 'hazard_reports.report_id, hazard_reports.reference_number, ' .
+            $select = 'hazard_reports.report_id, hazard_reports.user_id, hazard_reports.reference_number, ' .
                 'hazard_reports.category_id, hazard_reports.station_id, ' .
                 'hazard_reports.title, hazard_reports.description, ' .
                 'hazard_reports.address_details, hazard_reports.status, ' .
@@ -245,7 +245,8 @@ class Api_reports extends Controller
             $reports = $this->db->table('hazard_reports')
             ->select(
                 $select .
-                'hazard_categories.category_name, stations.station_name'
+                'hazard_categories.category_name, stations.station_name, ' .
+                "COALESCE(NULLIF(users.full_name, ''), 'Deleted User') AS reporter_name"
             )
             ->join(
                 'hazard_categories',
@@ -254,6 +255,10 @@ class Api_reports extends Controller
             ->left_join(
                 'stations',
                 'stations.station_id = hazard_reports.station_id'
+            )
+            ->left_join(
+                'users',
+                'users.user_id = hazard_reports.user_id'
             )
             ->where('hazard_reports.user_id', $this->userId())
             ->order_by('hazard_reports.submitted_at', 'DESC')
@@ -338,7 +343,8 @@ class Api_reports extends Controller
         try {
             $reports = $this->db->raw(
                 'SELECT r.report_id, r.reference_number, r.category_id, r.title, r.description, r.status, r.submitted_at, ' .
-                'c.category_name, b.barangay_name, ' .
+                "c.category_name, b.barangay_name, " .
+                "COALESCE(NULLIF(u.full_name, ''), 'Deleted User') AS reporter_name, " .
                 '(SELECT COUNT(*) FROM report_community_votes cv WHERE cv.report_id = r.report_id AND cv.vote = \'confirm\') AS confirm_count, ' .
                 '(SELECT COUNT(*) FROM report_community_votes dv WHERE dv.report_id = r.report_id AND dv.vote = \'dispute\') AS dispute_count, ' .
                 '(SELECT uv.vote FROM report_community_votes uv WHERE uv.report_id = r.report_id AND uv.user_id = ?) AS my_vote, ' .

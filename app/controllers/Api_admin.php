@@ -382,20 +382,32 @@ class Api_admin extends Controller
             api_error('Invalid record ID.', 400);
         }
 
-        if ($table === 'users' && (string) $id === (string) $this->currentUser['user_id']) {
+        if ($table === 'users'
+            && (string) $id === (string) ($this->currentUser['user_id'] ?? '')) {
             api_error('You cannot delete your own administrator account.', 403);
         }
 
         try {
             $deleted = $this->Admin_model->delete_record($table, $id);
             if ($deleted) {
-                api_response(null, 200, $info['label'] . ' record deleted successfully.');
+                $message = $table === 'users'
+                    ? 'User deleted. Submitted hazard reports and historical audit logs have been preserved.'
+                    : $info['label'] . ' record deleted successfully.';
+                api_response(null, 200, $message);
             } else {
                 api_error('No record was deleted.', 404);
             }
-        } catch (\PDOException $e) {
+        } catch (\RuntimeException $e) {
+            error_log('Admin delete blocked for ' . $table . ': ' . $e->getMessage());
+            api_error($e->getMessage(), 409);
+        } catch (\Throwable $e) {
             error_log('Admin delete failed for ' . $table . ': ' . $e->getMessage());
-            api_error('Could not delete record. It may be referenced by other records.', 400);
+            api_error(
+                $table === 'users'
+                    ? 'Could not delete user while preserving report and audit history. Check the database logs and apply the user-history migration.'
+                    : 'Could not delete record. It may be referenced by other records.',
+                $table === 'users' ? 500 : 400
+            );
         }
     }
 

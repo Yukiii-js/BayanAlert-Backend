@@ -438,6 +438,13 @@ tables, run [`manual_migration_010_password_reset_tokens.sql`](./manual_migratio
 in the selected database. The reset routes are
 `POST /api/auth/request-password-reset` and `POST /api/auth/reset-password`.
 
+Before deploying the admin user-deletion workflow to an existing database, run
+[`manual_migration_014_user_deletion_preserve_history.sql`](./manual_migration_014_user_deletion_preserve_history.sql)
+against the Aiven database. It changes user foreign keys on historical records
+to `ON DELETE SET NULL` and makes known historical user-reference columns
+nullable. Admin deletion removes transient notification and verification records
+in the same transaction and preserves submitted reports, evidence, and audit history.
+
 When an admin marks a hazard report `verified` or `approved`, the edit form
 preselects the routed department email, shows the report details to be sent, and
 allows the admin to change the recipient or disable email delivery before

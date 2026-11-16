@@ -21,7 +21,7 @@ class Hazard_model extends Model
                 {$filter['severity_select']},
                 {$detail['select']},
                 reports.status,
-                barangays.barangay_name,
+                COALESCE(barangays.barangay_name, 'Former Resident') AS barangay_name,
                 reports.submitted_at AS date_reported
             FROM hazard_reports AS reports
             LEFT JOIN hazard_categories AS categories
@@ -105,8 +105,8 @@ class Hazard_model extends Model
                 reports.status,
                 reports.submitted_at AS date_reported
             FROM hazard_reports AS reports
-            INNER JOIN users ON users.user_id = reports.user_id
-            INNER JOIN barangays ON barangays.barangay_id = users.barangay_id
+            LEFT JOIN users ON users.user_id = reports.user_id
+            LEFT JOIN barangays ON barangays.barangay_id = users.barangay_id
             LEFT JOIN hazard_categories AS categories
                 ON categories.category_id = reports.category_id
             {$detail['joins']}
@@ -251,8 +251,8 @@ class Hazard_model extends Model
         $verificationColumns = $this->table_columns('report_verifications');
         $select = [
             in_array('full_name', $userColumns, true)
-                ? 'users.full_name AS reporter_name'
-                : 'NULL AS reporter_name',
+            ? "COALESCE(NULLIF(users.full_name, ''), 'Deleted User') AS reporter_name"
+            : "'Deleted User' AS reporter_name",
         ];
 
         $contactParts = [];
