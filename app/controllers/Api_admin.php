@@ -191,8 +191,19 @@ class Api_admin extends Controller
             $isNewlyApproved = $table === 'hazard_reports'
                 && in_array($newStatus, ['approved', 'verified'], true)
                 && !in_array($oldStatus, ['approved', 'verified'], true);
-            $sendDepartmentEmail = !isset($input['send_department_email'])
-                || !in_array($input['send_department_email'], [false, 0, '0', 'false'], true);
+            $sendDepartmentEmail = false;
+            if (array_key_exists('send_department_email', $input)) {
+                $emailOption = filter_var(
+                    $input['send_department_email'],
+                    FILTER_VALIDATE_BOOLEAN,
+                    FILTER_NULL_ON_FAILURE
+                );
+                if ($emailOption === null) {
+                    api_error('Department email delivery must be enabled or disabled explicitly.', 422);
+                    return;
+                }
+                $sendDepartmentEmail = $emailOption;
+            }
             $notificationEmail = isset($input['department_email']) && is_string($input['department_email'])
                 ? trim($input['department_email'])
                 : '';
@@ -209,7 +220,7 @@ class Api_admin extends Controller
                     $notificationEmail = $defaultDepartment['email'];
                 }
                 if (!filter_var($notificationEmail, FILTER_VALIDATE_EMAIL)) {
-                    api_error('Enter a valid notification contact email or turn off department email before approving.', 422);
+                    api_error('A valid recipient email is required when department email delivery is enabled.', 422);
                     return;
                 }
             }
