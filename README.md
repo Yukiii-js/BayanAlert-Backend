@@ -190,15 +190,14 @@ $database['main'] = array(
 The database username can be provided as `DB_USER` (the `.env.example` name) or
 `DB_USERNAME`; if both are set, `DB_USERNAME` takes precedence.
 
-For managed MySQL providers such as Aiven, set `DB_HOST`, `DB_PORT`, `DB_USER`,
-`DB_PASSWORD`, and `DB_NAME` to the values from the provider console. Download
-the provider CA certificate and make it available to the backend deployment as
-a file, then set `DB_SSL_CA` to that file's path. The backend enables TLS and
-verifies the server certificate when this setting is present. Keep the
-certificate on the backend only; do not commit it or put database credentials
-in frontend environment variables. On Render, add the Aiven CA certificate as a
-Secret File and set `DB_SSL_CA` to its mounted path (for example,
-`/etc/secrets/aiven-ca.pem`).
+For managed MySQL providers such as Aiven, set `DB_HOST`, `DB_PORT`,
+`DB_USERNAME` (or `DB_USER`), `DB_PASSWORD`, and `DB_NAME` to the values from
+the provider console. Download the provider CA certificate and add it to Render
+as a Secret File named `aiven-ca.pem`. The backend automatically uses
+`/etc/secrets/aiven-ca.pem`; if you use a different file name or path, set
+`DB_SSL_CA` to its mounted path. It verifies the server certificate when
+connecting. Keep the certificate on the backend only; do not commit it or put
+database credentials in frontend environment variables.
 
 ### Calapan weather forecast
 

@@ -146,10 +146,11 @@ class Errors
 				if (!headers_sent()) {
 					header('Content-Type: application/json; charset=utf-8');
 				}
+				$client_message = $this->database_error_hint($message, $exception);
 				echo json_encode([
 					'success' => false,
-					'error' => 'Database service is unavailable.',
-					'message' => 'Database service is unavailable.',
+					'error' => $client_message,
+					'message' => $client_message,
 				]);
 			} else {
 				if (!headers_sent()) {
@@ -179,5 +180,37 @@ class Errors
 
 		require_once($template_path . $template . '.php');
 		exit();
+	}
+
+	private function database_error_hint($message, $exception)
+	{
+		$driver_code = 0;
+		$sql_state = '';
+		if ($exception instanceof PDOException) {
+			$error_info = $exception->errorInfo ?? [];
+			$driver_code = (int) ($error_info[1] ?? 0);
+			$sql_state = (string) ($error_info[0] ?? $exception->getCode());
+		}
+
+		if ($driver_code === 2026 || stripos((string) $message, 'ssl') !== false
+			|| stripos((string) $message, 'tls') !== false
+			|| stripos((string) $message, 'certificate') !== false) {
+			return 'Database TLS verification failed. Check that the Aiven CA Secret File is mounted and DB_SSL_CA points to it.';
+		}
+		if ($driver_code === 1045 || $driver_code === 1044 || $sql_state === '28000') {
+			return 'Database authentication failed. Verify the Render DB_USERNAME (or DB_USER) and DB_PASSWORD values.';
+		}
+		if (in_array($driver_code, [2002, 2003, 2005, 2006, 2013], true)) {
+			return 'Could not reach Aiven MySQL. Check Render DB_HOST, DB_PORT, Aiven service status, and network access.';
+		}
+		if ($driver_code === 1049) {
+			return 'The configured database name was not found. Verify Render DB_NAME.';
+		}
+		if (in_array($driver_code, [1054, 1146], true)
+			|| $sql_state === '42S02' || $sql_state === '42S22') {
+			return 'The Aiven database schema does not match the application. Check the required migrations.';
+		}
+
+		return 'Database service is unavailable. Check the Render backend logs for the database failure category.';
 	}
 }

@@ -270,6 +270,19 @@ class Database {
 
         try {
             $sslCa = $database_config['ssl_ca'] ?? '';
+            $isAivenMysql = $driver === 'mysql'
+                && strpos(strtolower((string) $host), 'aivencloud.com') !== false;
+            if ($isAivenMysql && $sslCa === '') {
+                $renderCaPath = '/etc/secrets/aiven-ca.pem';
+                if (is_file($renderCaPath) && is_readable($renderCaPath)) {
+                    $sslCa = $renderCaPath;
+                }
+            }
+            if ($isAivenMysql && $sslCa === '') {
+                throw new PDOException(
+                    'Aiven MySQL requires a verified CA certificate. Configure DB_SSL_CA or mount it at /etc/secrets/aiven-ca.pem.'
+                );
+            }
             if ($driver === 'mysql' && $sslCa !== '') {
                 $sslCaPath = realpath($sslCa);
                 if ($sslCaPath === false || !is_file($sslCaPath) || !is_readable($sslCaPath)) {
