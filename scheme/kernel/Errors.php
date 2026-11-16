@@ -136,8 +136,19 @@ class Errors
 	 */
 	public function show_database_error($message, $sql = '', $bindings = [], $exception = null, $template = 'error_db')
 	{
-		error_log('Database operation failed: ' . $message);
-		http_response_code(500);
+		$error_context = $this->database_error_context($message, $exception);
+		$error_file = $exception ? $exception->getFile() : 'Unknown';
+		$error_line = $exception ? $exception->getLine() : 'Unknown';
+		error_log(sprintf(
+			'Database operation failed: %s | SQLSTATE=%s | MySQL=%s | at=%s:%s',
+			$message,
+			$error_context['sql_state'] !== '' ? $error_context['sql_state'] : 'unknown',
+			$error_context['driver_code'] > 0 ? $error_context['driver_code'] : 'unknown',
+			$error_file,
+			$error_line
+		));
+		$connection_error = in_array($error_context['driver_code'], [1045, 2002, 2003, 2005, 2006, 2013], true);
+		http_response_code($connection_error ? 503 : 500);
 		
 		if (config_item('environment') !== 'development') {
 			$request_path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
@@ -146,7 +157,7 @@ class Errors
 				if (!headers_sent()) {
 					header('Content-Type: application/json; charset=utf-8');
 				}
-				$client_message = $this->database_error_hint($message, $exception);
+				$client_message = $this->database_error_hint($message, $error_context, $request_path);
 				echo json_encode([
 					'success' => false,
 					'error' => $client_message,
@@ -182,7 +193,7 @@ class Errors
 		exit();
 	}
 
-	private function database_error_hint($message, $exception)
+	private function database_error_context($message, $exception)
 	{
 		$driver_code = 0;
 		$sql_state = '';
@@ -190,25 +201,58 @@ class Errors
 			$error_info = $exception->errorInfo ?? [];
 			$driver_code = (int) ($error_info[1] ?? 0);
 			$sql_state = (string) ($error_info[0] ?? $exception->getCode());
+			if ($driver_code === 0 && is_numeric($exception->getCode())) {
+				$driver_code = (int) $exception->getCode();
+			}
+		}
+		if ($sql_state === '' && preg_match('/SQLSTATE\[([A-Z0-9]+)\]/i', (string) $message, $matches)) {
+			$sql_state = strtoupper($matches[1]);
+		}
+		if ($driver_code === 0
+			&& preg_match('/SQLSTATE\[[^\]]+\].*?:\s*(\d{4})\b/i', (string) $message, $matches)) {
+			$driver_code = (int) $matches[1];
 		}
 
+		return [
+			'sql_state' => $sql_state,
+			'driver_code' => $driver_code
+		];
+	}
+
+	private function database_error_hint($message, array $error_context, $request_path)
+	{
+		$driver_code = $error_context['driver_code'];
+		$sql_state = $error_context['sql_state'];
 		if ($driver_code === 2026 || stripos((string) $message, 'ssl') !== false
 			|| stripos((string) $message, 'tls') !== false
 			|| stripos((string) $message, 'certificate') !== false) {
-			return 'Database TLS negotiation failed. Check the Aiven connection settings; configure DB_SSL_CA to verify the server certificate.';
+			return 'Database TLS negotiation failed. Check the Aiven connection settings; DB_SSL_CA is optional and enables server certificate verification.';
 		}
-		if ($driver_code === 1045 || $driver_code === 1044 || $sql_state === '28000') {
+		if ($driver_code === 1045 || $sql_state === '28000') {
 			return 'Database authentication failed. Verify the Render DB_USERNAME (or DB_USER) and DB_PASSWORD values.';
 		}
 		if (in_array($driver_code, [2002, 2003, 2005, 2006, 2013], true)) {
 			return 'Could not reach Aiven MySQL. Check Render DB_HOST, DB_PORT, Aiven service status, and network access.';
+		}
+		if ($driver_code === 1044) {
+			return 'The Aiven database user does not have permission to access the configured database.';
 		}
 		if ($driver_code === 1049) {
 			return 'The configured database name was not found. Verify Render DB_NAME.';
 		}
 		if (in_array($driver_code, [1054, 1146], true)
 			|| $sql_state === '42S02' || $sql_state === '42S22') {
+			if (strpos((string) $request_path, '/api/admin/tables/users') === 0) {
+				return 'Admin users query failed (SQLSTATE ' . ($sql_state ?: 'unknown')
+					. ($driver_code > 0 ? ', MySQL ' . $driver_code : '')
+					. '): ' . trim(preg_split('/\bQuery:\s*/i', (string) $message, 2)[0]);
+			}
 			return 'The Aiven database schema does not match the application. Check the required migrations.';
+		}
+		if (strpos((string) $request_path, '/api/admin/tables/users') === 0) {
+			return 'Admin users query failed (SQLSTATE ' . ($sql_state ?: 'unknown')
+				. ($driver_code > 0 ? ', MySQL ' . $driver_code : '')
+				. '): ' . trim(preg_split('/\bQuery:\s*/i', (string) $message, 2)[0]);
 		}
 
 		return 'Database service is unavailable. Check the Render backend logs for the database failure category.';

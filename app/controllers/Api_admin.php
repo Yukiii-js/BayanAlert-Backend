@@ -57,13 +57,12 @@ class Api_admin extends Controller
 
     public function table($table)
     {
-        $info = $this->get_table_info($table);
-        $searchInput = $this->request->get('q', '');
-        $pageInput = $this->request->get('page', '1');
-        $search = is_string($searchInput) ? trim($searchInput) : '';
-        $page = is_numeric($pageInput) && (int) $pageInput > 0 ? (int) $pageInput : 1;
-
         try {
+            $info = $this->get_table_info($table);
+            $searchInput = $this->request->get('q', '');
+            $pageInput = $this->request->get('page', '1');
+            $search = is_string($searchInput) ? trim($searchInput) : '';
+            $page = is_numeric($pageInput) && (int) $pageInput > 0 ? (int) $pageInput : 1;
             $result = $this->Admin_model->get_rows($table, $search, $page);
             $schema = $this->Admin_model->get_schema($table);
             if ($table === 'hazard_reports') {
@@ -83,8 +82,43 @@ class Api_admin extends Controller
                 'page'          => $result['page'],
                 'page_size'     => $result['page_size']
             ]);
-        } catch (\Exception $e) {
-            api_error('Could not fetch table records: ' . $e->getMessage(), 500);
+        } catch (\Throwable $e) {
+            $errorInfo = $e instanceof \PDOException ? ($e->errorInfo ?? []) : [];
+            $sqlState = (string) ($errorInfo[0] ?? $e->getCode());
+            $driverCode = (int) ($errorInfo[1] ?? 0);
+            if ($driverCode === 0 && is_numeric($e->getCode())) {
+                $driverCode = (int) $e->getCode();
+            }
+            if ($sqlState === '' && preg_match('/SQLSTATE\[([A-Z0-9]+)\]/i', $e->getMessage(), $matches)) {
+                $sqlState = strtoupper($matches[1]);
+            }
+            if ($driverCode === 0
+                && preg_match('/SQLSTATE\[[^\]]+\].*?:\s*(\d{4})\b/i', $e->getMessage(), $matches)) {
+                $driverCode = (int) $matches[1];
+            }
+
+            error_log(sprintf(
+                'Admin table fetch failed (%s): %s | SQLSTATE=%s | MySQL=%s | at=%s:%s',
+                $table,
+                $e->getMessage(),
+                $sqlState !== '' ? $sqlState : 'unknown',
+                $driverCode > 0 ? $driverCode : 'unknown',
+                $e->getFile(),
+                $e->getLine()
+            ));
+
+            $connectionFailure = in_array($driverCode, [1045, 2002, 2003, 2005, 2006, 2013], true);
+            if ($connectionFailure) {
+                api_error(
+                    'Database connection failed (MySQL ' . $driverCode . '). Check the Render and Aiven connection settings.',
+                    503
+                );
+            }
+
+            $detail = trim(preg_split('/\bQuery:\s*/i', $e->getMessage(), 2)[0]);
+            $diagnostic = 'SQLSTATE ' . ($sqlState !== '' ? $sqlState : 'unknown')
+                . ($driverCode > 0 ? ', MySQL ' . $driverCode : '');
+            api_error('Could not fetch table records (' . $diagnostic . '): ' . $detail, 500);
         }
     }
 

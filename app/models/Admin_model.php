@@ -119,6 +119,7 @@ class Admin_model extends Model
 
     private $schema_cache = [];
     private $table_model_cache = [];
+    private $user_moderation_schema_checked = false;
 
     private function table_model_name($table)
     {
@@ -160,6 +161,9 @@ class Admin_model extends Model
     public function get_schema($table)
     {
         $info = $this->get_table_info($table);
+        if ($table === 'users') {
+            $this->ensure_user_moderation_columns();
+        }
         if (isset($this->schema_cache[$table])) {
             return $this->schema_cache[$table];
         }
@@ -227,6 +231,47 @@ class Admin_model extends Model
         return $columns;
     }
 
+    private function ensure_user_moderation_columns()
+    {
+        if ($this->user_moderation_schema_checked) {
+            return;
+        }
+
+        $lockName = 'bayanalert_users_moderation_schema';
+        $lockAcquired = (int) $this->db->raw(
+            'SELECT GET_LOCK(?, 10)',
+            [$lockName]
+        )->fetchColumn() === 1;
+        if (!$lockAcquired) {
+            throw new RuntimeException('Could not acquire the users schema update lock.');
+        }
+
+        try {
+            $columns = array_column(
+                $this->db->raw('SHOW COLUMNS FROM `users`')->fetchAll(PDO::FETCH_ASSOC),
+                'Field'
+            );
+            $optionalColumns = [
+                'warning_strikes' => '`warning_strikes` INT NOT NULL DEFAULT 0',
+                'status' => "`status` ENUM('active','suspended') NOT NULL DEFAULT 'active'",
+                'suspension_reason' => '`suspension_reason` TEXT NULL'
+            ];
+
+            foreach ($optionalColumns as $column => $definition) {
+                if (!in_array($column, $columns, true)) {
+                    $this->db->raw(
+                        'ALTER TABLE `users` ADD COLUMN ' . $definition
+                    );
+                }
+            }
+
+            unset($this->schema_cache['users']);
+            $this->user_moderation_schema_checked = true;
+        } finally {
+            $this->db->raw('SELECT RELEASE_LOCK(?)', [$lockName]);
+        }
+    }
+
     public function get_column_names($table)
     {
         $names = [];
@@ -267,6 +312,9 @@ class Admin_model extends Model
             if (!$available) {
                 $unavailableTables[] = $table;
             }
+        }
+        if (!empty($availableTables['users'])) {
+            $this->ensure_user_moderation_columns();
         }
 
         $reportCount = $counts['hazard_reports'] ?? 0;
@@ -431,7 +479,6 @@ class Admin_model extends Model
         $page = max(1, (int) $page);
         $offset = ($page - 1) * $pageSize;
 
-        $countQuery = $this->db->table($table);
         $rowsQuery = $this->db->table($table);
 
         if ($table === 'users') {
@@ -447,34 +494,30 @@ class Admin_model extends Model
 
             $selectColumns = array_map(function ($column) {
                 if ($column === 'role_id') {
-                    return 'roles.role_name AS role_name';
+                    return 'roles.role_name';
                 }
                 if ($column === 'barangay_id') {
-                    return 'barangays.barangay_name AS barangay_name';
+                    return 'barangays.barangay_name';
                 }
                 return 'users.' . $column;
             }, $columns);
 
             $rowsQuery->left_join('roles', 'roles.role_id = users.role_id')
                 ->left_join('barangays', 'barangays.barangay_id = users.barangay_id');
-            $countQuery->left_join('roles', 'roles.role_id = users.role_id')
-                ->left_join('barangays', 'barangays.barangay_id = users.barangay_id');
         } else {
             $selectColumns = $columns;
         }
 
         $rowsQuery->select(implode(', ', $selectColumns));
+        $pattern = null;
         if ($search !== '' && $searchColumn !== null) {
             if ($table === 'users') {
                 $pattern = '%' . $search . '%';
-                foreach ([$countQuery, $rowsQuery] as $query) {
-                    $query->like('users.full_name', $pattern)
-                        ->or_like('users.username', $pattern)
-                        ->or_like('users.email', $pattern)
-                        ->or_like('barangays.barangay_name', $pattern);
-                }
+                $rowsQuery->like('users.full_name', $pattern)
+                    ->or_like('users.username', $pattern)
+                    ->or_like('users.email', $pattern)
+                    ->or_like('barangays.barangay_name', $pattern);
             } else {
-                $countQuery->like($searchColumn, '%' . $search . '%');
                 $rowsQuery->like($searchColumn, '%' . $search . '%');
             }
         }
@@ -499,10 +542,32 @@ class Admin_model extends Model
             $displayColumns[] = 'dispute_count';
         }
 
+        if ($table === 'users') {
+            $countSql = 'SELECT COUNT(*) FROM `users` ' .
+                'LEFT JOIN `roles` ON `roles`.`role_id` = `users`.`role_id` ' .
+                'LEFT JOIN `barangays` ON `barangays`.`barangay_id` = `users`.`barangay_id`';
+            $countParams = [];
+            if ($pattern !== null) {
+                $countSql .= ' WHERE `users`.`full_name` LIKE ? ' .
+                    'OR `users`.`username` LIKE ? ' .
+                    'OR `users`.`email` LIKE ? ' .
+                    'OR `barangays`.`barangay_name` LIKE ?';
+                $countParams = [$pattern, $pattern, $pattern, $pattern];
+            }
+            $total = (int) $this->db->raw($countSql, $countParams)->fetchColumn();
+        } else {
+            $total = (int) $this->db->table($table)->count();
+            if ($search !== '' && $searchColumn !== null) {
+                $countQuery = $this->db->table($table)
+                    ->like($searchColumn, '%' . $search . '%');
+                $total = (int) $countQuery->count();
+            }
+        }
+
         return [
             'columns' => $displayColumns,
             'rows' => $rows,
-            'total' => (int) $countQuery->count(),
+            'total' => $total,
             'search_column' => $searchColumn,
             'page' => $page,
             'page_size' => $pageSize
