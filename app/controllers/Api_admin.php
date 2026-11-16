@@ -188,6 +188,9 @@ class Api_admin extends Controller
         try {
             $oldStatus = strtolower(trim((string) ($record['status'] ?? '')));
             $newStatus = strtolower(trim((string) ($validation['data']['status'] ?? '')));
+            $hasStatusTransition = $table === 'hazard_reports'
+                && array_key_exists('status', $validation['data'])
+                && $oldStatus !== $newStatus;
             $isNewlyApproved = $table === 'hazard_reports'
                 && in_array($newStatus, ['approved', 'verified'], true)
                 && !in_array($oldStatus, ['approved', 'verified'], true);
@@ -225,9 +228,27 @@ class Api_admin extends Controller
                 }
             }
 
-            $this->Admin_model->update_record($table, $id, $validation['data']);
-
             $message = $info['label'] . ' record updated successfully.';
+            if ($hasStatusTransition) {
+                $this->db->transaction();
+                try {
+                    $this->Admin_model->update_record($table, $id, $validation['data']);
+                    $this->Admin_model->record_hazard_status_transition(
+                        (int) $id,
+                        $oldStatus,
+                        $newStatus,
+                        (int) ($this->currentUser['user_id'] ?? 0)
+                    );
+                    $this->db->commit();
+                } catch (\Throwable $workflowError) {
+                    $this->db->roll_back();
+                    error_log('Hazard report workflow update failed for report ' . (int) $id . ': ' . $workflowError->getMessage());
+                    api_error('Could not update the report and its workflow audit records.', 500);
+                    return;
+                }
+            } else {
+                $this->Admin_model->update_record($table, $id, $validation['data']);
+            }
 
             if ($table === 'hazard_reports'
                 && isset($validation['data']['status'])

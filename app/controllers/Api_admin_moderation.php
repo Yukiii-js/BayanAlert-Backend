@@ -9,6 +9,7 @@ class Api_admin_moderation extends Controller
     public function __construct()
     {
         parent::__construct();
+        $this->call->model('Admin_model');
         $this->currentUser = require_api_auth();
         $this->authorized = strtolower(trim((string) ($this->currentUser['role_name'] ?? ''))) === 'admin';
         if (!$this->authorized) {
@@ -200,11 +201,24 @@ class Api_admin_moderation extends Controller
                 return;
             }
 
-            $this->db->raw(
-                "UPDATE hazard_reports SET status = 'resolved', resolved_at = COALESCE(resolved_at, NOW()), updated_at = NOW() " .
-                'WHERE report_id = ?',
-                [(int) $id]
-            );
+            $this->db->transaction();
+            try {
+                $this->db->raw(
+                    "UPDATE hazard_reports SET status = 'resolved', resolved_at = COALESCE(resolved_at, NOW()), updated_at = NOW() " .
+                    'WHERE report_id = ?',
+                    [(int) $id]
+                );
+                $this->Admin_model->record_hazard_status_transition(
+                    (int) $id,
+                    (string) $report['status'],
+                    'resolved',
+                    (int) ($this->currentUser['user_id'] ?? 0)
+                );
+                $this->db->commit();
+            } catch (\Throwable $workflowError) {
+                $this->db->roll_back();
+                throw $workflowError;
+            }
 
             $notificationWarning = '';
             if (!empty($report['user_id'])) {

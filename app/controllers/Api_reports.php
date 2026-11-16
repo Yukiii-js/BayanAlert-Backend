@@ -373,6 +373,7 @@ class Api_reports extends Controller
                 foreach ($evidence as $item) {
                     $evidenceByReport[(int) $item['report_id']][] = $item;
                 }
+
             }
 
             foreach ($reports as &$report) {
@@ -419,6 +420,40 @@ class Api_reports extends Controller
         } catch (\Throwable $e) {
             error_log('Community dashboard error: ' . $e->getMessage());
             api_error('Unable to load current community data.', 500);
+        }
+    }
+
+    public function communityMap()
+    {
+        try {
+            if (!$this->hasReportCoordinates()) {
+                api_response(['reports' => [], 'coordinates_available' => false]);
+                return;
+            }
+
+            $severity = $this->hasSeverityColumn()
+                ? 'r.severity_level'
+                : 'NULL AS severity_level';
+            $reports = $this->db->raw(
+                'SELECT r.report_id, r.reference_number, r.category_id, r.title, r.status, ' .
+                'r.submitted_at, ' . $severity . ', r.latitude, r.longitude, c.category_name ' .
+                'FROM hazard_reports r ' .
+                'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
+                "WHERE LOWER(COALESCE(r.status, '')) IN ('approved', 'verified', 'assigned', 'in_progress') " .
+                'AND (r.user_id IS NULL OR r.user_id <> ?) ' .
+                'AND r.latitude BETWEEN 13.25 AND 13.55 ' .
+                'AND r.longitude BETWEEN 121.05 AND 121.32 ' .
+                'ORDER BY r.submitted_at DESC LIMIT 500',
+                [$this->userId()]
+            )->fetchAll(PDO::FETCH_ASSOC);
+
+            api_response([
+                'reports' => $reports ?: [],
+                'coordinates_available' => true,
+            ]);
+        } catch (\Throwable $e) {
+            error_log('Community hazard map error: ' . $e->getMessage());
+            api_error('Unable to load verified community hazard locations.', 500);
         }
     }
 

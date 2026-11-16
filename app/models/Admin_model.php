@@ -682,6 +682,132 @@ class Admin_model extends Model
             ->update($data);
     }
 
+    public function record_hazard_status_transition($reportId, $oldStatus, $newStatus, $adminId)
+    {
+        $this->insert_status_history(
+            (int) $reportId,
+            (string) $oldStatus,
+            (string) $newStatus,
+            (int) $adminId
+        );
+
+        if (!in_array(strtolower((string) $newStatus), ['verified', 'approved', 'disputed', 'rejected'], true)) {
+            return;
+        }
+
+        $this->insert_report_verification(
+            (int) $reportId,
+            (string) $newStatus,
+            (int) $adminId
+        );
+    }
+
+    private function insert_status_history($reportId, $oldStatus, $newStatus, $adminId)
+    {
+        $columns = $this->workflow_table_columns('report_status_history');
+        $values = [
+            'report_id' => $reportId,
+            'old_status' => $oldStatus,
+            'previous_status' => $oldStatus,
+            'from_status' => $oldStatus,
+            'new_status' => $newStatus,
+            'to_status' => $newStatus,
+            'status' => $newStatus,
+            'changed_by' => $adminId,
+            'admin_id' => $adminId,
+            'changed_at' => date('Y-m-d H:i:s'),
+            'created_at' => date('Y-m-d H:i:s'),
+            'change_reason' => 'Administrator status update',
+            'reason' => 'Administrator status update',
+            'remarks' => 'Administrator status update',
+            'notes' => 'Administrator status update',
+        ];
+        $this->insert_workflow_row(
+            'report_status_history',
+            $columns,
+            $values,
+            ['report_id', 'new_status', 'to_status', 'status']
+        );
+    }
+
+    private function insert_report_verification($reportId, $status, $adminId)
+    {
+        $columns = $this->workflow_table_columns('report_verifications');
+        $values = [
+            'report_id' => $reportId,
+            'verifier_id' => $adminId,
+            'verified_by' => $adminId,
+            'admin_id' => $adminId,
+            'verification_status' => $status,
+            'status' => $status,
+            'decision' => $status,
+            'result' => $status,
+            'verification_result' => $status,
+            'is_verified' => in_array(strtolower($status), ['verified', 'approved'], true) ? 1 : 0,
+            'verified_at' => date('Y-m-d H:i:s'),
+            'created_at' => date('Y-m-d H:i:s'),
+            'admin_remarks' => 'Administrator status update',
+            'verification_remarks' => 'Administrator status update',
+            'remarks' => 'Administrator status update',
+            'notes' => 'Administrator status update',
+        ];
+        $this->insert_workflow_row(
+            'report_verifications',
+            $columns,
+            $values,
+            ['report_id', 'verification_status', 'status', 'decision', 'result', 'is_verified']
+        );
+    }
+
+    private function workflow_table_columns($table)
+    {
+        $allowedTables = ['report_status_history', 'report_verifications'];
+        if (!in_array($table, $allowedTables, true)) {
+            throw new InvalidArgumentException('Unsupported report workflow table.');
+        }
+
+        $exists = $this->db->raw("SHOW TABLES LIKE '" . $table . "'")->fetch(PDO::FETCH_NUM);
+        if (!$exists) {
+            throw new RuntimeException('Required audit table ' . $table . ' is not available.');
+        }
+
+        $columns = $this->db->raw('SHOW COLUMNS FROM `' . $table . '`')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        return array_map(static function ($column) {
+            return $column['Field'] ?? '';
+        }, $columns);
+    }
+
+    private function insert_workflow_row($table, array $columns, array $values, array $requiredCandidates)
+    {
+        $insertData = [];
+        foreach ($values as $column => $value) {
+            if (in_array($column, $columns, true)) {
+                $insertData[$column] = $value;
+            }
+        }
+
+        $hasRequiredData = false;
+        foreach ($requiredCandidates as $candidate) {
+            if (array_key_exists($candidate, $insertData)) {
+                $hasRequiredData = true;
+                break;
+            }
+        }
+        if (!$hasRequiredData) {
+            throw new RuntimeException('Required workflow fields are missing from ' . $table . '.');
+        }
+
+        $columnSql = implode(', ', array_map(static function ($column) {
+            return '`' . str_replace('`', '``', $column) . '`';
+        }, array_keys($insertData)));
+        $placeholders = implode(', ', array_fill(0, count($insertData), '?'));
+        $this->db->raw(
+            'INSERT INTO `' . $table . '` (' . $columnSql . ') VALUES (' . $placeholders . ')',
+            array_values($insertData)
+        );
+    }
+
     public function delete_record($table, $id)
     {
         $info = $this->get_table_info($table);

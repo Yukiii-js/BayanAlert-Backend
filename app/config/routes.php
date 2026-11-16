@@ -119,6 +119,7 @@ $router->get('api/location-suggestions', 'Api_barangays::suggestions');
 // Resident Reports API
 $router->get('api/media/evidence/{filename}', 'Api_media::evidence');
 $router->get('api/reports/community', 'Api_reports::community');
+$router->get('api/reports/community-map', 'Api_reports::communityMap');
 $router->get('api/map/reports', 'Api_map::reports');
 $router->get('api/weather/calapan', 'Api_weather::calapan');
 $router->get('api/external/resident-feed', 'ExternalApiController::residentFeed');
