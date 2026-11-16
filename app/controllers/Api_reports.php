@@ -2,6 +2,8 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
+require_once APP_DIR . 'libraries/EvidenceStorage.php';
+
 class Api_reports extends Controller
 {
     private $currentUser;
@@ -23,6 +25,31 @@ class Api_reports extends Controller
     private function userId()
     {
         return (int) ($this->currentUser['user_id'] ?? $this->currentUser['sub'] ?? 0);
+    }
+
+    private function ensureNotSuspended()
+    {
+        try {
+            $user = $this->db->raw(
+                'SELECT status, suspension_reason FROM users WHERE user_id = ? LIMIT 1',
+                [$this->userId()]
+            )->fetch(PDO::FETCH_ASSOC);
+            if (!$user || strtolower(trim((string) ($user['status'] ?? 'active'))) !== 'suspended') {
+                return true;
+            }
+
+            $reason = trim((string) ($user['suspension_reason'] ?? ''));
+            api_error(
+                'Your account is suspended and cannot submit or edit hazard reports.' .
+                    ($reason !== '' ? ' Reason: ' . $reason : ''),
+                403
+            );
+            return false;
+        } catch (\Throwable $e) {
+            error_log('Suspension check failed for user ' . $this->userId() . ': ' . $e->getMessage());
+            api_error('Unable to verify your account status. Please try again later.', 503);
+            return false;
+        }
     }
 
     private function validId($id)
@@ -50,6 +77,13 @@ class Api_reports extends Controller
             && in_array('longitude', $columns, true);
     }
 
+    private function hasSeverityColumn()
+    {
+        $columns = $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')
+            ->fetchAll(PDO::FETCH_COLUMN);
+        return in_array('severity_level', $columns, true);
+    }
+
     private function reportCoordinates($input)
     {
         $latitude = $input['latitude'] ?? null;
@@ -70,6 +104,12 @@ class Api_reports extends Controller
             || (float) $latitude < -90 || (float) $latitude > 90
             || (float) $longitude < -180 || (float) $longitude > 180) {
             api_error('Select a valid map location.', 422);
+            return null;
+        }
+
+        if ((float) $latitude < 13.25 || (float) $latitude > 13.55
+            || (float) $longitude < 121.05 || (float) $longitude > 121.32) {
+            api_error('Select a map location within Calapan City, Oriental Mindoro.', 422);
             return null;
         }
 
@@ -101,6 +141,7 @@ class Api_reports extends Controller
                 'hazard_reports.description, hazard_reports.address_details, hazard_reports.status, ' .
                 'hazard_reports.submitted_at, hazard_reports.updated_at, ' .
                 ($this->hasReportCoordinates() ? 'hazard_reports.latitude, hazard_reports.longitude, ' : '') .
+                ($this->hasSeverityColumn() ? 'hazard_reports.severity_level, ' : 'NULL AS severity_level, ') .
                 'hazard_categories.category_name, stations.station_name'
             )
             ->join('hazard_categories', 'hazard_categories.category_id = hazard_reports.category_id')
@@ -123,10 +164,73 @@ class Api_reports extends Controller
         return $report;
     }
 
+    private function uploadRequestError()
+    {
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+        if (stripos($contentType, 'multipart/form-data') === false) {
+            return null;
+        }
+
+        $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+        $postMax = trim((string) ini_get('post_max_size'));
+        $unit = strtolower(substr($postMax, -1));
+        $postMaxBytes = (float) $postMax;
+
+        if ($unit === 'g') {
+            $postMaxBytes *= 1024 * 1024 * 1024;
+        } elseif ($unit === 'm') {
+            $postMaxBytes *= 1024 * 1024;
+        } elseif ($unit === 'k') {
+            $postMaxBytes *= 1024;
+        }
+
+        if ($contentLength > 0 && $postMaxBytes > 0
+            && $contentLength > $postMaxBytes
+            && empty($_POST) && empty($_FILES)) {
+            return [
+                'status' => 413,
+                'message' => 'The upload exceeds the server post_max_size limit. Increase PHP post_max_size and try again.'
+            ];
+        }
+
+        $files = $_FILES['evidence'] ?? null;
+        if (!$files || !isset($files['error'])) {
+            return null;
+        }
+
+        $errors = is_array($files['error']) ? $files['error'] : [$files['error']];
+        foreach ($errors as $error) {
+            if ($error === UPLOAD_ERR_OK || $error === UPLOAD_ERR_NO_FILE) {
+                continue;
+            }
+
+            if ($error === UPLOAD_ERR_INI_SIZE || $error === UPLOAD_ERR_FORM_SIZE) {
+                return [
+                    'status' => 413,
+                    'message' => 'An evidence file exceeds the PHP upload size limit. Increase PHP upload_max_filesize and post_max_size, then try again.'
+                ];
+            }
+
+            if ($error === UPLOAD_ERR_PARTIAL) {
+                return [
+                    'status' => 400,
+                    'message' => 'An evidence file was only partially uploaded. Please try again.'
+                ];
+            }
+
+            return [
+                'status' => 400,
+                'message' => 'An evidence file could not be uploaded. Check the server upload configuration and try again.'
+            ];
+        }
+
+        return null;
+    }
+
     public function index()
     {
         try {
-            $select = 'hazard_reports.report_id, hazard_reports.reference_number, ' .
+            $select = 'hazard_reports.report_id, hazard_reports.user_id, hazard_reports.reference_number, ' .
                 'hazard_reports.category_id, hazard_reports.station_id, ' .
                 'hazard_reports.title, hazard_reports.description, ' .
                 'hazard_reports.address_details, hazard_reports.status, ' .
@@ -134,11 +238,15 @@ class Api_reports extends Controller
             if ($this->hasReportCoordinates()) {
                 $select .= 'hazard_reports.latitude, hazard_reports.longitude, ';
             }
+            $select .= $this->hasSeverityColumn()
+                ? 'hazard_reports.severity_level, '
+                : 'NULL AS severity_level, ';
 
             $reports = $this->db->table('hazard_reports')
             ->select(
                 $select .
-                'hazard_categories.category_name, stations.station_name'
+                'hazard_categories.category_name, stations.station_name, ' .
+                "COALESCE(NULLIF(users.full_name, ''), 'Deleted User') AS reporter_name"
             )
             ->join(
                 'hazard_categories',
@@ -148,10 +256,15 @@ class Api_reports extends Controller
                 'stations',
                 'stations.station_id = hazard_reports.station_id'
             )
+            ->left_join(
+                'users',
+                'users.user_id = hazard_reports.user_id'
+            )
             ->where('hazard_reports.user_id', $this->userId())
             ->order_by('hazard_reports.submitted_at', 'DESC')
             ->get_all();
 
+            $this->attachAdminRemarks($reports);
             foreach ($reports as &$report) {
                 $report['evidence'] = $this->db->table('report_evidence')
                     ->select('evidence_id, report_id, file_path, evidence_type, description, uploaded_at')
@@ -167,18 +280,112 @@ class Api_reports extends Controller
         }
     }
 
+    private function attachAdminRemarks(array &$reports)
+    {
+        if (!$reports) {
+            return;
+        }
+
+        if (!$this->db->raw("SHOW TABLES LIKE 'report_verifications'")->fetch(PDO::FETCH_NUM)) {
+            return;
+        }
+        $columns = $this->db->raw('SHOW COLUMNS FROM `report_verifications`')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        $columnNames = array_map(static function ($column) {
+            return $column['Field'] ?? '';
+        }, $columns);
+        $remarksColumn = null;
+        foreach (['admin_remarks', 'verification_remarks', 'remarks', 'notes'] as $candidate) {
+            if (in_array($candidate, $columnNames, true)) {
+                $remarksColumn = $candidate;
+                break;
+            }
+        }
+
+        foreach ($reports as &$report) {
+            $report['admin_remarks'] = null;
+        }
+        unset($report);
+
+        if ($remarksColumn === null) {
+            return;
+        }
+
+        $reportIds = array_values(array_filter(array_map(static function ($report) {
+            return (int) ($report['report_id'] ?? 0);
+        }, $reports)));
+        if (!$reportIds) {
+            return;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
+        $remarks = $this->db->raw(
+            'SELECT rv.report_id, rv.`' . $remarksColumn . '` AS admin_remarks ' .
+            'FROM report_verifications rv INNER JOIN (' .
+            'SELECT report_id, MAX(verification_id) AS verification_id ' .
+            'FROM report_verifications WHERE report_id IN (' . $placeholders . ') GROUP BY report_id' .
+            ') latest ON latest.verification_id = rv.verification_id',
+            $reportIds
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $remarksByReport = [];
+        foreach ($remarks as $item) {
+            $remarksByReport[(int) $item['report_id']] = $item['admin_remarks'];
+        }
+
+        foreach ($reports as &$report) {
+            $report['admin_remarks'] = $remarksByReport[(int) $report['report_id']] ?? null;
+        }
+        unset($report);
+    }
+
     public function community()
     {
         try {
             $reports = $this->db->raw(
                 'SELECT r.report_id, r.reference_number, r.category_id, r.title, r.description, r.status, r.submitted_at, ' .
-                'c.category_name, b.barangay_name ' .
+                "c.category_name, b.barangay_name, " .
+                "COALESCE(NULLIF(u.full_name, ''), 'Deleted User') AS reporter_name, " .
+                '(SELECT COUNT(*) FROM report_community_votes cv WHERE cv.report_id = r.report_id AND cv.vote = \'confirm\') AS confirm_count, ' .
+                '(SELECT COUNT(*) FROM report_community_votes dv WHERE dv.report_id = r.report_id AND dv.vote = \'dispute\') AS dispute_count, ' .
+                '(SELECT uv.vote FROM report_community_votes uv WHERE uv.report_id = r.report_id AND uv.user_id = ?) AS my_vote, ' .
+                '(r.user_id <> ?) AS can_vote ' .
                 'FROM hazard_reports r ' .
                 'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
                 'LEFT JOIN users u ON u.user_id = r.user_id ' .
                 'LEFT JOIN barangays b ON b.barangay_id = u.barangay_id ' .
-                'ORDER BY r.submitted_at DESC LIMIT 100'
+                'WHERE (r.user_id IS NULL OR r.user_id <> ?) ' .
+                'ORDER BY r.submitted_at DESC LIMIT 100',
+                [$this->userId(), $this->userId(), $this->userId()]
             )->fetchAll(PDO::FETCH_ASSOC);
+
+            $reportIds = array_map(
+                static function ($report) {
+                    return (int) $report['report_id'];
+                },
+                $reports
+            );
+            $evidenceByReport = [];
+
+            if ($reportIds) {
+                $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
+                $evidence = $this->db->raw(
+                    'SELECT evidence_id, report_id, file_path, evidence_type, uploaded_at ' .
+                    'FROM report_evidence ' .
+                    'WHERE report_id IN (' . $placeholders . ') AND evidence_type IN (?, ?) ' .
+                    'ORDER BY uploaded_at ASC, evidence_id ASC',
+                    array_merge($reportIds, ['photo', 'video'])
+                )->fetchAll(PDO::FETCH_ASSOC);
+
+                foreach ($evidence as $item) {
+                    $evidenceByReport[(int) $item['report_id']][] = $item;
+                }
+
+            }
+
+            foreach ($reports as &$report) {
+                $report['evidence'] = $evidenceByReport[(int) $report['report_id']] ?? [];
+            }
+            unset($report);
 
             $statusCounts = $this->db->raw(
                 'SELECT status, COUNT(*) AS total FROM hazard_reports GROUP BY status ORDER BY status'
@@ -219,6 +426,109 @@ class Api_reports extends Controller
         } catch (\Throwable $e) {
             error_log('Community dashboard error: ' . $e->getMessage());
             api_error('Unable to load current community data.', 500);
+        }
+    }
+
+    public function communityMap()
+    {
+        try {
+            if (!$this->hasReportCoordinates()) {
+                api_response(['reports' => [], 'coordinates_available' => false]);
+                return;
+            }
+
+            $severity = $this->hasSeverityColumn()
+                ? 'r.severity_level'
+                : 'NULL AS severity_level';
+            $reports = $this->db->raw(
+                'SELECT r.report_id, r.reference_number, r.category_id, r.title, r.status, ' .
+                'r.submitted_at, ' . $severity . ', r.latitude, r.longitude, c.category_name ' .
+                'FROM hazard_reports r ' .
+                'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
+                "WHERE LOWER(COALESCE(r.status, '')) IN ('approved', 'verified', 'assigned', 'in_progress') " .
+                'AND (r.user_id IS NULL OR r.user_id <> ?) ' .
+                'AND r.latitude BETWEEN 13.25 AND 13.55 ' .
+                'AND r.longitude BETWEEN 121.05 AND 121.32 ' .
+                'ORDER BY r.submitted_at DESC LIMIT 500',
+                [$this->userId()]
+            )->fetchAll(PDO::FETCH_ASSOC);
+
+            api_response([
+                'reports' => $reports ?: [],
+                'coordinates_available' => true,
+            ]);
+        } catch (\Throwable $e) {
+            error_log('Community hazard map error: ' . $e->getMessage());
+            api_error('Unable to load verified community hazard locations.', 500);
+        }
+    }
+
+    public function vote($id)
+    {
+        if (!$this->validId($id)) {
+            api_error('Invalid report ID.', 400);
+            return;
+        }
+
+        $input = $this->input();
+        if (!array_key_exists('vote', $input)) {
+            api_error('Choose confirm or dispute, or clear your existing vote.', 422);
+            return;
+        }
+
+        $vote = $input['vote'] ?? null;
+        if ($vote !== null && !in_array($vote, ['confirm', 'dispute'], true)) {
+            api_error('Choose confirm or dispute, or clear your existing vote.', 422);
+            return;
+        }
+
+        try {
+            $report = $this->db->raw(
+                'SELECT user_id FROM hazard_reports WHERE report_id = ?',
+                [(int) $id]
+            )->fetch(PDO::FETCH_ASSOC);
+
+            if (!$report) {
+                api_error('Report not found.', 404);
+                return;
+            }
+
+            if ((int) $report['user_id'] === $this->userId()) {
+                api_error('You cannot vote on your own report.', 403);
+                return;
+            }
+
+            if ($vote === null) {
+                $this->db->raw(
+                    'DELETE FROM report_community_votes WHERE report_id = ? AND user_id = ?',
+                    [(int) $id, $this->userId()]
+                );
+            } else {
+                $this->db->raw(
+                    'INSERT INTO report_community_votes (report_id, user_id, vote, created_at, updated_at) ' .
+                    'VALUES (?, ?, ?, NOW(), NOW()) ' .
+                    'ON DUPLICATE KEY UPDATE vote = VALUES(vote), updated_at = NOW()',
+                    [(int) $id, $this->userId(), $vote]
+                );
+            }
+
+            $summary = $this->db->raw(
+                'SELECT ' .
+                '(SELECT COUNT(*) FROM report_community_votes WHERE report_id = ? AND vote = \'confirm\') AS confirm_count, ' .
+                '(SELECT COUNT(*) FROM report_community_votes WHERE report_id = ? AND vote = \'dispute\') AS dispute_count, ' .
+                '(SELECT vote FROM report_community_votes WHERE report_id = ? AND user_id = ?) AS my_vote',
+                [(int) $id, (int) $id, (int) $id, $this->userId()]
+            )->fetch(PDO::FETCH_ASSOC);
+
+            api_response([
+                'report_id' => (int) $id,
+                'confirm_count' => (int) ($summary['confirm_count'] ?? 0),
+                'dispute_count' => (int) ($summary['dispute_count'] ?? 0),
+                'my_vote' => $summary['my_vote'] ?? null,
+            ], 200, 'Your community vote was saved.');
+        } catch (\Throwable $e) {
+            error_log('Community report vote failed for report ' . (int) $id . ': ' . $e->getMessage());
+            api_error('Unable to save your vote. Please try again.', 500);
         }
     }
 
@@ -263,7 +573,10 @@ class Api_reports extends Controller
     {
         try {
             $stations = $this->db->table('stations')
-                ->select('station_id, station_name')
+                ->select(
+                    'station_id, department_code, station_name, address_details, contact_number, ' .
+                    'contact_email, station_info, latitude, longitude, is_active'
+                )
                 ->get_all();
 
             api_response(['stations' => $stations ?: []]);
@@ -275,17 +588,22 @@ class Api_reports extends Controller
 
     public function store()
     {
+        if (!$this->ensureNotSuspended()) return;
+
+        $uploadError = $this->uploadRequestError();
+        if ($uploadError !== null) {
+            api_error($uploadError['message'], $uploadError['status']);
+            return;
+        }
+
         $input = $this->input();
 
         $categoryId = (int) ($input['category_id'] ?? 0);
-        $stationValue = $input['station_id'] ?? '';
-        $stationId = ($stationValue === '' || $stationValue === null)
-            ? null
-            : (int) $stationValue;
 
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
         $address = trim((string) ($input['address_details'] ?? ''));
+        $severity = strtolower(trim((string) ($input['severity_level'] ?? 'moderate')));
         $coordinates = $this->reportCoordinates($input);
         if ($coordinates === null) {
             return;
@@ -295,14 +613,13 @@ class Api_reports extends Controller
             api_error('Category, title, description, and address are required.', 422);
             return;
         }
-
-        if (mb_strlen($title) > 200 || mb_strlen($address) > 255) {
-            api_error('The title or address exceeds the allowed length.', 422);
+        if (!in_array($severity, ['low', 'moderate', 'high', 'critical'], true)) {
+            api_error('Choose a valid hazard severity level.', 422);
             return;
         }
 
-        if ($stationId !== null && $stationId < 1) {
-            api_error('Invalid station.', 422);
+        if (mb_strlen($title) > 200 || mb_strlen($address) > 255) {
+            api_error('The title or address exceeds the allowed length.', 422);
             return;
         }
 
@@ -317,27 +634,17 @@ class Api_reports extends Controller
                 return;
             }
 
-            if ($stationId !== null) {
-                $station = $this->db->table('stations')
-                    ->where('station_id', $stationId)
-                    ->get();
-
-                if (!$station) {
-                    api_error('Select a valid station.', 422);
-                    return;
-                }
-            }
-
             $referenceNumber = 'BA-' . date('YmdHis') . '-' . random_int(100, 999);
 
             $reportData = [
                 'reference_number' => $referenceNumber,
                 'user_id' => $this->userId(),
                 'category_id' => $categoryId,
-                'station_id' => $stationId,
+                'station_id' => null,
                 'title' => $title,
                 'description' => $description,
                 'address_details' => $address,
+                'severity_level' => $severity,
                 'status' => 'pending',
                 'submitted_at' => date('Y-m-d H:i:s'),
                 'updated_at' => date('Y-m-d H:i:s')
@@ -345,6 +652,7 @@ class Api_reports extends Controller
             if ($this->hasReportCoordinates()) {
                 $reportData = array_merge($reportData, $coordinates);
             }
+            if (!$this->hasSeverityColumn()) unset($reportData['severity_level']);
 
             $inserted = $this->db->table('hazard_reports')->insert($reportData);
 
@@ -377,10 +685,30 @@ class Api_reports extends Controller
                 return;
             }
 
+            $notificationWarning = '';
+            try {
+                $adminNotifications = $this->db->raw(
+                    "INSERT INTO notifications (user_id, report_id, target_type, title, message, notification_type, is_read, created_at) " .
+                    "SELECT u.user_id, ?, 'report', 'New hazard report submitted', ?, 'new_report', 0, NOW() " .
+                    "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
+                    "WHERE r.role_name = 'admin' AND u.account_status = 'active'",
+                    [
+                        $reportId,
+                        'A resident submitted report ' . $referenceNumber . '. Review it in the report register.'
+                    ]
+                );
+                if ($adminNotifications->rowCount() < 1) {
+                    $notificationWarning = ' No active administrators were available to receive the notification.';
+                }
+            } catch (\Throwable $e) {
+                error_log('New report admin notification failed for report ' . $reportId . ': ' . $e->getMessage());
+                $notificationWarning = ' The report was saved, but administrator notifications could not be delivered.';
+            }
+
             api_response([
                 'report_id' => $reportId,
                 'reference_number' => $referenceNumber
-            ], 201, 'Hazard report submitted successfully.');
+            ], 201, 'Hazard report submitted successfully.' . $notificationWarning);
         } catch (\Throwable $e) {
             error_log('Report store error: ' . $e->getMessage());
             api_error('Unable to save the report.', 500);
@@ -389,22 +717,27 @@ class Api_reports extends Controller
 
     public function update($id)
     {
+        if (!$this->ensureNotSuspended()) return;
+
         if (!$this->validId($id)) {
             api_error('Invalid report ID.', 400);
+            return;
+        }
+
+        $uploadError = $this->uploadRequestError();
+        if ($uploadError !== null) {
+            api_error($uploadError['message'], $uploadError['status']);
             return;
         }
 
         $input = $this->input();
 
         $categoryId = (int) ($input['category_id'] ?? 0);
-        $stationValue = $input['station_id'] ?? '';
-        $stationId = ($stationValue === '' || $stationValue === null)
-            ? null
-            : (int) $stationValue;
 
         $title = trim((string) ($input['title'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
         $address = trim((string) ($input['address_details'] ?? ''));
+        $severity = strtolower(trim((string) ($input['severity_level'] ?? 'moderate')));
         $coordinates = $this->reportCoordinates($input);
         if ($coordinates === null) {
             return;
@@ -412,6 +745,10 @@ class Api_reports extends Controller
 
         if ($categoryId < 1 || $title === '' || $description === '' || $address === '') {
             api_error('Category, title, description, and address are required.', 422);
+            return;
+        }
+        if (!in_array($severity, ['low', 'moderate', 'high', 'critical'], true)) {
+            api_error('Choose a valid hazard severity level.', 422);
             return;
         }
 
@@ -443,25 +780,16 @@ class Api_reports extends Controller
                 return;
             }
 
-            if ($stationId !== null) {
-                $station = $this->db->table('stations')
-                    ->where('station_id', $stationId)
-                    ->get();
-
-                if (!$station) {
-                    api_error('Select a valid station.', 422);
-                    return;
-                }
-            }
-
             $reportData = [
                 'category_id' => $categoryId,
-                'station_id' => $stationId,
                 'title' => $title,
                 'description' => $description,
                 'address_details' => $address,
                 'updated_at' => date('Y-m-d H:i:s')
             ];
+            if ($this->hasSeverityColumn()) {
+                $reportData['severity_level'] = $severity;
+            }
             if ($this->hasReportCoordinates()) {
                 $reportData = array_merge($reportData, $coordinates);
             }
@@ -508,7 +836,7 @@ class Api_reports extends Controller
             $names = $files['name'];
         }
 
-        $uploadDirectory = FCPATH . 'uploads/evidence/';
+        $uploadDirectory = EvidenceStorage::directory();
 
         if (!is_dir($uploadDirectory) &&
             !mkdir($uploadDirectory, 0755, true) &&

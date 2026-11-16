@@ -119,6 +119,7 @@ class Admin_model extends Model
 
     private $schema_cache = [];
     private $table_model_cache = [];
+    private $user_moderation_schema_checked = false;
 
     private function table_model_name($table)
     {
@@ -160,6 +161,9 @@ class Admin_model extends Model
     public function get_schema($table)
     {
         $info = $this->get_table_info($table);
+        if ($table === 'users') {
+            $this->ensure_user_moderation_columns();
+        }
         if (isset($this->schema_cache[$table])) {
             return $this->schema_cache[$table];
         }
@@ -227,6 +231,47 @@ class Admin_model extends Model
         return $columns;
     }
 
+    private function ensure_user_moderation_columns()
+    {
+        if ($this->user_moderation_schema_checked) {
+            return;
+        }
+
+        $lockName = 'bayanalert_users_moderation_schema';
+        $lockAcquired = (int) $this->db->raw(
+            'SELECT GET_LOCK(?, 10)',
+            [$lockName]
+        )->fetchColumn() === 1;
+        if (!$lockAcquired) {
+            throw new RuntimeException('Could not acquire the users schema update lock.');
+        }
+
+        try {
+            $columns = array_column(
+                $this->db->raw('SHOW COLUMNS FROM `users`')->fetchAll(PDO::FETCH_ASSOC),
+                'Field'
+            );
+            $optionalColumns = [
+                'warning_strikes' => '`warning_strikes` INT NOT NULL DEFAULT 0',
+                'status' => "`status` ENUM('active','suspended') NOT NULL DEFAULT 'active'",
+                'suspension_reason' => '`suspension_reason` TEXT NULL'
+            ];
+
+            foreach ($optionalColumns as $column => $definition) {
+                if (!in_array($column, $columns, true)) {
+                    $this->db->raw(
+                        'ALTER TABLE `users` ADD COLUMN ' . $definition
+                    );
+                }
+            }
+
+            unset($this->schema_cache['users']);
+            $this->user_moderation_schema_checked = true;
+        } finally {
+            $this->db->raw('SELECT RELEASE_LOCK(?)', [$lockName]);
+        }
+    }
+
     public function get_column_names($table)
     {
         $names = [];
@@ -268,6 +313,9 @@ class Admin_model extends Model
                 $unavailableTables[] = $table;
             }
         }
+        if (!empty($availableTables['users'])) {
+            $this->ensure_user_moderation_columns();
+        }
 
         $reportCount = $counts['hazard_reports'] ?? 0;
         $pendingReports = 0;
@@ -282,16 +330,98 @@ class Admin_model extends Model
                 ->select('status, COUNT(*) AS total')
                 ->group_by('status')
                 ->get_all();
-            $recentReports = $this->db->table('hazard_reports')
-                ->select('report_id, reference_number, title, status, submitted_at')
+            $recentReportColumns = [
+                'hazard_reports.report_id',
+                'hazard_reports.reference_number',
+                'hazard_reports.title',
+                'hazard_reports.description',
+                'hazard_reports.address_details',
+                'hazard_reports.status',
+                'hazard_reports.submitted_at',
+                'hazard_reports.category_id',
+                'hazard_reports.station_id',
+            ];
+
+            if (!empty($availableTables['hazard_categories'])) {
+                $recentReportColumns[] = 'hazard_categories.category_name';
+            }
+            if (!empty($availableTables['stations'])) {
+                $recentReportColumns[] = 'stations.station_name';
+            }
+
+            $recentReportsQuery = $this->db->table('hazard_reports')
+                ->select(implode(', ', $recentReportColumns));
+            if (!empty($availableTables['hazard_categories'])) {
+                $recentReportsQuery->left_join(
+                    'hazard_categories',
+                    'hazard_categories.category_id = hazard_reports.category_id'
+                );
+            }
+            if (!empty($availableTables['stations'])) {
+                $recentReportsQuery->left_join(
+                    'stations',
+                    'stations.station_id = hazard_reports.station_id'
+                );
+            }
+
+            $recentReports = $recentReportsQuery
                 ->order_by('submitted_at', 'DESC')
                 ->limit(6)
                 ->get_all();
+
+            foreach ($recentReports as &$report) {
+                $report['evidence'] = [];
+            }
+            unset($report);
+
+            if ($recentReports && !empty($availableTables['report_evidence'])) {
+                $reportIds = array_map(
+                    static function ($report) {
+                        return (int) $report['report_id'];
+                    },
+                    $recentReports
+                );
+                $placeholders = implode(',', array_fill(0, count($reportIds), '?'));
+                $evidence = $this->db->raw(
+                    'SELECT evidence_id, report_id, file_path, evidence_type, description, uploaded_at ' .
+                    'FROM report_evidence ' .
+                    'WHERE report_id IN (' . $placeholders . ') AND evidence_type IN (?, ?) ' .
+                    'ORDER BY uploaded_at ASC, evidence_id ASC',
+                    array_merge($reportIds, ['photo', 'video'])
+                )->fetchAll(PDO::FETCH_ASSOC);
+                $evidenceByReport = [];
+
+                foreach ($evidence as $item) {
+                    $evidenceByReport[(int) $item['report_id']][] = $item;
+                }
+                foreach ($recentReports as &$report) {
+                    $report['evidence'] = $evidenceByReport[(int) $report['report_id']] ?? [];
+                }
+                unset($report);
+            }
         }
 
-        $activeUsers = !empty($availableTables['users'])
-            ? (int) $this->db->table('users')->where('account_status', 'active')->count()
-            : 0;
+        $userSummary = [
+            'active' => 0,
+            'suspended' => 0,
+            'verified_email' => 0
+        ];
+        if (!empty($availableTables['users'])) {
+            $summary = $this->db->raw(
+                'SELECT ' .
+                'SUM(CASE WHEN account_status = ? THEN 1 ELSE 0 END) AS active_accounts, ' .
+                'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS suspended_accounts, ' .
+                'SUM(CASE WHEN email_verified_at IS NOT NULL THEN 1 ELSE 0 END) AS verified_emails ' .
+                'FROM users',
+                ['active', 'suspended']
+            )->fetch(PDO::FETCH_ASSOC) ?: [];
+            $userSummary = [
+                'active' => (int) ($summary['active_accounts'] ?? 0),
+                'suspended' => (int) ($summary['suspended_accounts'] ?? 0),
+                'verified_email' => (int) ($summary['verified_emails'] ?? 0)
+            ];
+        }
+        $activeUsers = $userSummary['active'];
 
         return [
             'counts' => $counts,
@@ -299,11 +429,29 @@ class Admin_model extends Model
             'report_count' => $reportCount,
             'pending_reports' => $pendingReports,
             'active_users' => $activeUsers,
+            'user_summary' => $userSummary,
             'recent_reports' => $recentReports ?: [],
             'report_statuses' => $reportStatuses ?: [],
             'table_availability' => $availableTables,
             'unavailable_tables' => $unavailableTables
         ];
+    }
+
+    public function get_barangay_incident_counts()
+    {
+        $rows = $this->db->raw(
+            'SELECT users.barangay_id, COUNT(hazard_reports.report_id) AS incident_count ' .
+            'FROM users INNER JOIN hazard_reports ON hazard_reports.user_id = users.user_id ' .
+            'WHERE users.barangay_id IS NOT NULL ' .
+            'GROUP BY users.barangay_id'
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(string) $row['barangay_id']] = (int) $row['incident_count'];
+        }
+
+        return $counts;
     }
 
     private function table_exists($table)
@@ -319,7 +467,8 @@ class Admin_model extends Model
     public function get_rows($table, $search = '', $page = 1, $pageSize = 25)
     {
         $model = $this->get_table_model($table);
-        if ($model && method_exists($model, 'get_all_records')) {
+        if ($table !== 'users' && $table !== 'hazard_reports'
+            && $model && method_exists($model, 'get_all_records')) {
             return $model->get_all_records($search, $page, $pageSize);
         }
 
@@ -330,7 +479,6 @@ class Admin_model extends Model
         $page = max(1, (int) $page);
         $offset = ($page - 1) * $pageSize;
 
-        $countQuery = $this->db->table($table);
         $rowsQuery = $this->db->table($table);
 
         if ($table === 'users') {
@@ -346,10 +494,10 @@ class Admin_model extends Model
 
             $selectColumns = array_map(function ($column) {
                 if ($column === 'role_id') {
-                    return 'roles.role_name AS role_name';
+                    return 'roles.role_name';
                 }
                 if ($column === 'barangay_id') {
-                    return 'barangays.barangay_name AS barangay_name';
+                    return 'barangays.barangay_name';
                 }
                 return 'users.' . $column;
             }, $columns);
@@ -361,17 +509,65 @@ class Admin_model extends Model
         }
 
         $rowsQuery->select(implode(', ', $selectColumns));
+        $pattern = null;
         if ($search !== '' && $searchColumn !== null) {
-            $countQuery->like($searchColumn, '%' . $search . '%');
-            $rowsQuery->like($searchColumn, '%' . $search . '%');
+            if ($table === 'users') {
+                $pattern = '%' . $search . '%';
+                $rowsQuery->like('users.full_name', $pattern)
+                    ->or_like('users.username', $pattern)
+                    ->or_like('users.email', $pattern)
+                    ->or_like('barangays.barangay_name', $pattern);
+            } else {
+                $rowsQuery->like($searchColumn, '%' . $search . '%');
+            }
+        }
+
+        $rows = $rowsQuery->order_by($table . '.' . $info['primary_key'], 'DESC')
+            ->limit($pageSize, $offset)
+            ->get_all();
+        if ($table === 'hazard_reports') {
+            $voteCounts = $this->get_report_vote_counts(
+                array_column($rows ?: [], 'report_id')
+            );
+            foreach ($rows as &$row) {
+                $counts = $voteCounts[(int) $row['report_id']] ?? [
+                    'confirm_count' => 0,
+                    'dispute_count' => 0
+                ];
+                $row['confirm_count'] = $counts['confirm_count'];
+                $row['dispute_count'] = $counts['dispute_count'];
+            }
+            unset($row);
+            $displayColumns[] = 'confirm_count';
+            $displayColumns[] = 'dispute_count';
+        }
+
+        if ($table === 'users') {
+            $countSql = 'SELECT COUNT(*) FROM `users` ' .
+                'LEFT JOIN `roles` ON `roles`.`role_id` = `users`.`role_id` ' .
+                'LEFT JOIN `barangays` ON `barangays`.`barangay_id` = `users`.`barangay_id`';
+            $countParams = [];
+            if ($pattern !== null) {
+                $countSql .= ' WHERE `users`.`full_name` LIKE ? ' .
+                    'OR `users`.`username` LIKE ? ' .
+                    'OR `users`.`email` LIKE ? ' .
+                    'OR `barangays`.`barangay_name` LIKE ?';
+                $countParams = [$pattern, $pattern, $pattern, $pattern];
+            }
+            $total = (int) $this->db->raw($countSql, $countParams)->fetchColumn();
+        } else {
+            $total = (int) $this->db->table($table)->count();
+            if ($search !== '' && $searchColumn !== null) {
+                $countQuery = $this->db->table($table)
+                    ->like($searchColumn, '%' . $search . '%');
+                $total = (int) $countQuery->count();
+            }
         }
 
         return [
             'columns' => $displayColumns,
-            'rows' => $rowsQuery->order_by($table . '.' . $info['primary_key'], 'DESC')
-                ->limit($pageSize, $offset)
-                ->get_all(),
-            'total' => (int) $countQuery->count(),
+            'rows' => $rows,
+            'total' => $total,
             'search_column' => $searchColumn,
             'page' => $page,
             'page_size' => $pageSize
@@ -380,18 +576,123 @@ class Admin_model extends Model
 
     public function get_record($table, $id)
     {
-        $model = $this->get_table_model($table);
-        if ($model && method_exists($model, 'find')) {
-            $record = $model->find($id);
-            if ($record !== null) {
-                return $record;
-            }
+        if ($table === 'users') {
+            $columns = array_map(static function ($column) {
+                return 'users.`' . str_replace('`', '``', $column) . '`';
+            }, $this->get_column_names('users'));
+            $columns[] = 'roles.role_name AS role_name';
+            $columns[] = 'barangays.barangay_name AS barangay_name';
+            return $this->db->raw(
+                'SELECT ' . implode(', ', $columns) . ' ' .
+                'FROM users ' .
+                'LEFT JOIN roles ON roles.role_id = users.role_id ' .
+                'LEFT JOIN barangays ON barangays.barangay_id = users.barangay_id ' .
+                'WHERE users.user_id = ? LIMIT 1',
+                [(int) $id]
+            )->fetch(PDO::FETCH_ASSOC);
         }
 
-        $info = $this->get_table_info($table);
-        return $this->db->table($table)
-            ->where($info['primary_key'], $id)
-            ->get();
+        $model = $this->get_table_model($table);
+        $record = null;
+        if ($model && method_exists($model, 'find')) {
+            $record = $model->find($id);
+        }
+
+        if ($record === null) {
+            $info = $this->get_table_info($table);
+            $record = $this->db->table($table)
+                ->where($info['primary_key'], $id)
+                ->get();
+        }
+        if ($table === 'hazard_reports' && $record) {
+            $counts = $this->get_report_vote_counts([(int) $record['report_id']]);
+            $record['confirm_count'] = $counts[(int) $record['report_id']]['confirm_count'] ?? 0;
+            $record['dispute_count'] = $counts[(int) $record['report_id']]['dispute_count'] ?? 0;
+        }
+
+        return $record;
+    }
+
+    private function get_report_vote_counts(array $reportIds)
+    {
+        $reportIds = array_values(array_unique(array_filter(array_map('intval', $reportIds))));
+        if (!$reportIds) {
+            return [];
+        }
+
+        $rows = $this->db->raw(
+            'SELECT report_id, ' .
+            'SUM(CASE WHEN vote = ? THEN 1 ELSE 0 END) AS confirm_count, ' .
+            'SUM(CASE WHEN vote = ? THEN 1 ELSE 0 END) AS dispute_count ' .
+            'FROM report_community_votes WHERE report_id IN (' .
+            implode(',', array_fill(0, count($reportIds), '?')) .
+            ') GROUP BY report_id',
+            array_merge(['confirm', 'dispute'], $reportIds)
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(int) $row['report_id']] = [
+                'confirm_count' => (int) $row['confirm_count'],
+                'dispute_count' => (int) $row['dispute_count']
+            ];
+        }
+
+        return $counts;
+    }
+
+    public function get_hazard_notification_data($reportId)
+    {
+        $reportColumns = array_column(
+            $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')->fetchAll(PDO::FETCH_ASSOC),
+            'Field'
+        );
+        $coordinates = [];
+        if (in_array('latitude', $reportColumns, true)) {
+            $coordinates[] = 'r.latitude';
+        } else {
+            $coordinates[] = 'NULL AS latitude';
+        }
+        if (in_array('longitude', $reportColumns, true)) {
+            $coordinates[] = 'r.longitude';
+        } else {
+            $coordinates[] = 'NULL AS longitude';
+        }
+
+        $severityColumn = in_array('severity_level', $reportColumns, true)
+            ? 'severity_level'
+            : (in_array('severity', $reportColumns, true) ? 'severity' : null);
+        $severity = $severityColumn !== null
+            ? 'r.`' . $severityColumn . '` AS severity_level'
+            : "'Not specified' AS severity_level";
+
+        $report = $this->db->raw(
+            'SELECT r.report_id, r.reference_number, r.title, r.description, r.address_details, r.status, ' .
+            'r.submitted_at, c.category_name, ' .
+            "COALESCE(NULLIF(u.full_name, ''), 'Deleted User') AS reporter_name, " .
+            implode(', ', $coordinates) . ', ' . $severity . ' ' .
+            'FROM hazard_reports r ' .
+            'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
+            'LEFT JOIN users u ON u.user_id = r.user_id ' .
+            'WHERE r.report_id = ? LIMIT 1',
+            [(int) $reportId]
+        )->fetch(PDO::FETCH_ASSOC);
+
+        if (!$report) {
+            return null;
+        }
+
+        $report['media'] = [];
+        if ($this->table_exists('report_evidence')) {
+            $report['media'] = $this->db->raw(
+                "SELECT file_path, evidence_type FROM report_evidence " .
+                "WHERE report_id = ? AND evidence_type IN ('photo', 'video') " .
+                'ORDER BY uploaded_at ASC, evidence_id ASC',
+                [(int) $reportId]
+            )->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        return $report;
     }
 
     public function get_reference_options($table, $field)
@@ -459,7 +760,7 @@ class Admin_model extends Model
                 continue;
             }
 
-            $value = is_string($value) ? trim($value) : '';
+            $value = is_scalar($value) ? trim((string) $value) : '';
             if ($value === '') {
                 if (!$field['nullable'] && $field['default'] === null) {
                     return ['data' => [], 'error' => $field['label'] . ' is required.'];
@@ -506,6 +807,10 @@ class Admin_model extends Model
 
         if ($table === 'users' && !$isUpdate && empty($data['password_hash'])) {
             return ['data' => [], 'error' => 'Password is required.'];
+        }
+
+        if ($isUpdate && empty($data)) {
+            return ['data' => [], 'error' => 'Provide at least one field to update.'];
         }
 
         return ['data' => $data, 'error' => null];
@@ -561,8 +866,278 @@ class Admin_model extends Model
             ->update($data);
     }
 
+    public function record_hazard_status_transition($reportId, $oldStatus, $newStatus, $adminId)
+    {
+        $this->insert_status_history(
+            (int) $reportId,
+            (string) $oldStatus,
+            (string) $newStatus,
+            (int) $adminId
+        );
+
+        if (!in_array(strtolower((string) $newStatus), ['verified', 'approved', 'disputed', 'rejected'], true)) {
+            return;
+        }
+
+        $this->insert_report_verification(
+            (int) $reportId,
+            (string) $newStatus,
+            (int) $adminId
+        );
+    }
+
+    private function insert_status_history($reportId, $oldStatus, $newStatus, $adminId)
+    {
+        $columns = $this->workflow_table_columns('report_status_history');
+        $values = [
+            'report_id' => $reportId,
+            'old_status' => $oldStatus,
+            'previous_status' => $oldStatus,
+            'from_status' => $oldStatus,
+            'new_status' => $newStatus,
+            'to_status' => $newStatus,
+            'status' => $newStatus,
+            'changed_by' => $adminId,
+            'admin_id' => $adminId,
+            'changed_at' => date('Y-m-d H:i:s'),
+            'created_at' => date('Y-m-d H:i:s'),
+            'change_reason' => 'Administrator status update',
+            'reason' => 'Administrator status update',
+            'remarks' => 'Administrator status update',
+            'notes' => 'Administrator status update',
+        ];
+        $this->insert_workflow_row(
+            'report_status_history',
+            $columns,
+            $values,
+            ['report_id', 'new_status', 'to_status', 'status']
+        );
+    }
+
+    private function insert_report_verification($reportId, $status, $adminId)
+    {
+        $columns = $this->workflow_table_columns('report_verifications');
+        $values = [
+            'report_id' => $reportId,
+            'verifier_id' => $adminId,
+            'verified_by' => $adminId,
+            'admin_id' => $adminId,
+            'verification_status' => $status,
+            'status' => $status,
+            'decision' => $status,
+            'result' => $status,
+            'verification_result' => $status,
+            'is_verified' => in_array(strtolower($status), ['verified', 'approved'], true) ? 1 : 0,
+            'verified_at' => date('Y-m-d H:i:s'),
+            'created_at' => date('Y-m-d H:i:s'),
+            'admin_remarks' => 'Administrator status update',
+            'verification_remarks' => 'Administrator status update',
+            'remarks' => 'Administrator status update',
+            'notes' => 'Administrator status update',
+        ];
+        $this->insert_workflow_row(
+            'report_verifications',
+            $columns,
+            $values,
+            ['report_id', 'verification_status', 'status', 'decision', 'result', 'is_verified']
+        );
+    }
+
+    private function workflow_table_columns($table)
+    {
+        $allowedTables = ['report_status_history', 'report_verifications'];
+        if (!in_array($table, $allowedTables, true)) {
+            throw new InvalidArgumentException('Unsupported report workflow table.');
+        }
+
+        $exists = $this->db->raw("SHOW TABLES LIKE '" . $table . "'")->fetch(PDO::FETCH_NUM);
+        if (!$exists) {
+            throw new RuntimeException('Required audit table ' . $table . ' is not available.');
+        }
+
+        $columns = $this->db->raw('SHOW COLUMNS FROM `' . $table . '`')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        return array_map(static function ($column) {
+            return $column['Field'] ?? '';
+        }, $columns);
+    }
+
+    private function insert_workflow_row($table, array $columns, array $values, array $requiredCandidates)
+    {
+        $insertData = [];
+        foreach ($values as $column => $value) {
+            if (in_array($column, $columns, true)) {
+                $insertData[$column] = $value;
+            }
+        }
+
+        $hasRequiredData = false;
+        foreach ($requiredCandidates as $candidate) {
+            if (array_key_exists($candidate, $insertData)) {
+                $hasRequiredData = true;
+                break;
+            }
+        }
+        if (!$hasRequiredData) {
+            throw new RuntimeException('Required workflow fields are missing from ' . $table . '.');
+        }
+
+        $columnSql = implode(', ', array_map(static function ($column) {
+            return '`' . str_replace('`', '``', $column) . '`';
+        }, array_keys($insertData)));
+        $placeholders = implode(', ', array_fill(0, count($insertData), '?'));
+        $this->db->raw(
+            'INSERT INTO `' . $table . '` (' . $columnSql . ') VALUES (' . $placeholders . ')',
+            array_values($insertData)
+        );
+    }
+
+    public function delete_user_safely($userId)
+    {
+        $userId = (int) $userId;
+        $user = $this->db->table('users')
+            ->select('user_id, email')
+            ->where('user_id', $userId)
+            ->get(PDO::FETCH_ASSOC);
+        if (!$user) {
+            return 0;
+        }
+
+        $this->db->transaction();
+        try {
+            foreach ([
+                ['notifications', 'user_id'],
+                ['otp_verifications', 'user_id'],
+                ['email_verification_tokens', 'user_id'],
+                ['password_reset_tokens', 'user_id']
+            ] as $reference) {
+                $this->delete_user_reference_rows($reference[0], $reference[1], $userId);
+            }
+
+            if (!empty($user['email'])) {
+                $this->delete_user_reference_rows('otp_verifications', 'email', $user['email']);
+                $this->delete_user_reference_rows(
+                    'registration_email_verifications',
+                    'email',
+                    $user['email']
+                );
+            }
+
+            $historicalReferences = [
+                'hazard_reports' => ['user_id'],
+                'report_verifications' => ['verified_by', 'verifier_id', 'user_id'],
+                'report_assignments' => ['assigned_by', 'assigned_to'],
+                'resolutions' => ['resolved_by', 'confirmed_by', 'user_id'],
+                'report_status_history' => ['changed_by', 'user_id'],
+                'report_evidence' => ['uploaded_by'],
+                'duplicate_report_checks' => ['checked_by'],
+                'report_community_votes' => ['user_id']
+            ];
+            $references = [];
+
+            foreach ($historicalReferences as $table => $columns) {
+                foreach ($columns as $column) {
+                    $metadata = $this->get_user_reference_column($table, $column);
+                    if ($metadata) {
+                        $references[$table . '.' . $column] = $metadata;
+                    }
+                }
+            }
+
+            $foreignKeys = $this->db->raw(
+                'SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME, c.IS_NULLABLE ' .
+                'FROM information_schema.KEY_COLUMN_USAGE AS kcu ' .
+                'INNER JOIN information_schema.COLUMNS AS c ' .
+                'ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA ' .
+                'AND c.TABLE_NAME = kcu.TABLE_NAME ' .
+                'AND c.COLUMN_NAME = kcu.COLUMN_NAME ' .
+                'WHERE kcu.TABLE_SCHEMA = DATABASE() ' .
+                'AND kcu.REFERENCED_TABLE_NAME = ? ' .
+                'AND kcu.REFERENCED_COLUMN_NAME = ?',
+                ['users', 'user_id']
+            )->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($foreignKeys as $foreignKey) {
+                $table = $foreignKey['TABLE_NAME'];
+                $column = $foreignKey['COLUMN_NAME'];
+                if (in_array($table, [
+                    'notifications',
+                    'otp_verifications',
+                    'email_verification_tokens',
+                    'password_reset_tokens'
+                ], true)) {
+                    continue;
+                }
+                $references[$table . '.' . $column] = [
+                    'table' => $table,
+                    'column' => $column,
+                    'nullable' => $foreignKey['IS_NULLABLE'] === 'YES'
+                ];
+            }
+
+            foreach ($references as $reference) {
+                if (!$reference['nullable']) {
+                    throw new RuntimeException(
+                        'User deletion is blocked because ' . $reference['table'] . '.' .
+                        $reference['column'] . ' is not nullable. Run the user-history foreign-key migration first.'
+                    );
+                }
+
+                $this->db->table($reference['table'])
+                    ->where($reference['column'], $userId)
+                    ->update([$reference['column'] => null]);
+            }
+
+            $deleted = $this->db->table('users')
+                ->where('user_id', $userId)
+                ->delete();
+            $this->db->commit();
+
+            return $deleted;
+        } catch (\Throwable $e) {
+            $this->db->roll_back();
+            throw $e;
+        }
+    }
+
+    private function delete_user_reference_rows($table, $column, $value)
+    {
+        $metadata = $this->get_user_reference_column($table, $column);
+        if (!$metadata) {
+            return;
+        }
+
+        $this->db->table($table)
+            ->where($column, $value)
+            ->delete();
+    }
+
+    private function get_user_reference_column($table, $column)
+    {
+        $metadata = $this->db->raw(
+            'SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE ' .
+            'FROM information_schema.COLUMNS ' .
+            'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1',
+            [$table, $column]
+        )->fetch(PDO::FETCH_ASSOC);
+
+        if (!$metadata) {
+            return null;
+        }
+
+        return [
+            'table' => $metadata['TABLE_NAME'],
+            'column' => $metadata['COLUMN_NAME'],
+            'nullable' => $metadata['IS_NULLABLE'] === 'YES'
+        ];
+    }
+
     public function delete_record($table, $id)
     {
+        if ($table === 'users') {
+            return $this->delete_user_safely($id);
+        }
+
         $info = $this->get_table_info($table);
         return $this->db->table($table)
             ->where($info['primary_key'], $id)

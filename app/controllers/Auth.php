@@ -24,12 +24,19 @@ class Auth extends Controller {
         $username = isset($post['username']) && is_string($post['username']) ? trim($post['username']) : '';
         $password = isset($post['password']) && is_string($post['password']) ? $post['password'] : '';
 
-        $user = $this->Auth_model->get_user_by_email_or_username($username);
+        try {
+            $user = $this->Auth_model->get_user_by_email_or_username($username);
+        } catch (\PDOException $e) {
+            error_log('Admin authentication lookup failed: ' . $e->getMessage());
+            $this->session->set_flashdata('error', 'Sign-in is temporarily unavailable. Please try again.');
+            redirect('auth/login');
+            return;
+        }
 
         if ($user
             && strtolower((string) $user['role_name']) === 'admin'
             && $user['account_status'] === 'active'
-            && password_verify($password, $user['password_hash'])) {
+            && $this->Auth_model->verify_password($password, $user['password_hash'] ?? null)) {
             $this->session->regenerate_on_login(true);
             $session_data = [
                 'user_id'   => $user['user_id'],
