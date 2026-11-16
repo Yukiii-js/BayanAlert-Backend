@@ -195,7 +195,7 @@ class Errors
 		if ($driver_code === 2026 || stripos((string) $message, 'ssl') !== false
 			|| stripos((string) $message, 'tls') !== false
 			|| stripos((string) $message, 'certificate') !== false) {
-			return 'Database TLS verification failed. Check that the Aiven CA Secret File is mounted and DB_SSL_CA points to it.';
+			return 'Database TLS negotiation failed. Check the Aiven connection settings; configure DB_SSL_CA to verify the server certificate.';
 		}
 		if ($driver_code === 1045 || $driver_code === 1044 || $sql_state === '28000') {
 			return 'Database authentication failed. Verify the Render DB_USERNAME (or DB_USER) and DB_PASSWORD values.';

@@ -278,11 +278,6 @@ class Database {
                     $sslCa = $renderCaPath;
                 }
             }
-            if ($isAivenMysql && $sslCa === '') {
-                throw new PDOException(
-                    'Aiven MySQL requires a verified CA certificate. Configure DB_SSL_CA or mount it at /etc/secrets/aiven-ca.pem.'
-                );
-            }
             if ($driver === 'mysql' && $sslCa !== '') {
                 $sslCaPath = realpath($sslCa);
                 if ($sslCaPath === false || !is_file($sslCaPath) || !is_readable($sslCaPath)) {
@@ -293,10 +288,35 @@ class Database {
                 }
                 $options[constant('PDO::MYSQL_ATTR_SSL_CA')] = $sslCaPath;
                 $options[constant('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')] = true;
+            } elseif ($isAivenMysql) {
+                $sslVerifyAttr = defined('Pdo\\Mysql::ATTR_SSL_VERIFY_SERVER_CERT')
+                    ? constant('Pdo\\Mysql::ATTR_SSL_VERIFY_SERVER_CERT')
+                    : (defined('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')
+                        ? constant('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')
+                        : null);
+                $sslCipherAttr = defined('Pdo\\Mysql::ATTR_SSL_CIPHER')
+                    ? constant('Pdo\\Mysql::ATTR_SSL_CIPHER')
+                    : (defined('PDO::MYSQL_ATTR_SSL_CIPHER')
+                        ? constant('PDO::MYSQL_ATTR_SSL_CIPHER')
+                        : null);
+                if ($sslVerifyAttr === null || $sslCipherAttr === null) {
+                    throw new PDOException('PDO MySQL TLS support is required to connect to Aiven.');
+                }
+
+                $options[$sslCipherAttr] = 'HIGH:!aNULL:!MD5';
+                $options[$sslVerifyAttr] = false;
             }
 
             $this->db = new PDO($dsn, $username, $password, $options);
             $this->driver = $this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($isAivenMysql && $sslCa === '') {
+                $sslStatus = $this->db->query("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
+                    ->fetch(PDO::FETCH_NUM);
+                if (empty($sslStatus[1])) {
+                    throw new PDOException('Aiven MySQL connection did not negotiate TLS.');
+                }
+                error_log('Aiven MySQL connected with TLS but without CA certificate verification.');
+            }
         } catch (Exception $e) {
             $error = load_class('Errors', 'kernel');
             $error->show_database_error(
