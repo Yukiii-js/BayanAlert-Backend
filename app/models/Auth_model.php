@@ -36,7 +36,11 @@ class Auth_model extends Model {
     public function get_user_by_email($email) {
         return $this->db->table($this->table)
                         ->join('roles', 'roles.role_id = users.role_id')
-                        ->select('users.*, roles.role_name')
+                        ->select(
+                            'users.user_id, users.role_id, users.full_name, users.email, ' .
+                            'users.account_status, users.email_verified_at, users.status, ' .
+                            'users.suspension_reason, roles.role_name'
+                        )
                         ->where('users.email', $email)
                         ->get();
     }
