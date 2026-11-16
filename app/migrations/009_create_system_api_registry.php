@@ -13,23 +13,48 @@ class Create_system_api_registry
     public function up()
     {
         $db = $this->_lava->db;
-        $columns = $db->raw('SHOW COLUMNS FROM `notifications`')->fetchAll(PDO::FETCH_COLUMN);
-        if (!in_array('target_type', $columns, true)) {
-            $db->raw('ALTER TABLE `notifications` ADD COLUMN `target_type` VARCHAR(16) NULL AFTER `notification_type`');
-        }
-        if (!in_array('advisory_id', $columns, true)) {
-            $db->raw('ALTER TABLE `notifications` ADD COLUMN `advisory_id` VARCHAR(128) NULL AFTER `report_id`');
-        }
-        $db->raw(
-            "UPDATE `notifications` SET `target_type` = CASE " .
-            "WHEN `report_id` IS NOT NULL THEN 'report' " .
-            "WHEN `notification_type` = 'external_hazard' THEN 'advisory' " .
-            "ELSE `target_type` END WHERE `target_type` IS NULL"
-        );
+        $dbforge = $this->_lava->dbforge;
+        if ($dbforge->table_exists('notifications')) {
+            if (!$dbforge->column_exists('notifications', 'target_type')) {
+                $dbforge->add_column('notifications', [
+                    'target_type' => [
+                        'type' => 'VARCHAR',
+                        'constraint' => 16,
+                        'null' => TRUE,
+                        'after' => 'notification_type',
+                    ],
+                ]);
+            }
+            if (!$dbforge->column_exists('notifications', 'advisory_id')) {
+                $dbforge->add_column('notifications', [
+                    'advisory_id' => [
+                        'type' => 'VARCHAR',
+                        'constraint' => 128,
+                        'null' => TRUE,
+                        'after' => 'report_id',
+                    ],
+                ]);
+            }
 
-        $apiColumns = $db->raw('SHOW COLUMNS FROM `external_api_configs`')->fetchAll(PDO::FETCH_COLUMN);
-        if (!in_array('rate_limit_until', $apiColumns, true)) {
-            $db->raw('ALTER TABLE `external_api_configs` ADD COLUMN `rate_limit_until` DATETIME NULL AFTER `last_error_message`');
+            $db->table('notifications')
+                ->where_null('target_type')
+                ->where_not_null('report_id')
+                ->update(['target_type' => 'report']);
+            $db->table('notifications')
+                ->where_null('target_type')
+                ->where('notification_type', 'external_hazard')
+                ->update(['target_type' => 'advisory']);
+        }
+
+        if ($dbforge->table_exists('external_api_configs')
+            && !$dbforge->column_exists('external_api_configs', 'rate_limit_until')) {
+            $dbforge->add_column('external_api_configs', [
+                'rate_limit_until' => [
+                    'type' => 'DATETIME',
+                    'null' => TRUE,
+                    'after' => 'last_error_message',
+                ],
+            ]);
         }
 
         if (!$this->_lava->dbforge->table_exists('system_apis')) {

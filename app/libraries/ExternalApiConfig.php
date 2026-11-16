@@ -17,10 +17,11 @@ class ExternalApiConfig
         }
 
         try {
-            $row = $database->raw(
-                'SELECT is_enabled FROM external_api_configs WHERE api_key = ? LIMIT 1',
-                [$key]
-            )->fetch(PDO::FETCH_ASSOC);
+            $row = $database->table('external_api_configs')
+                ->select('is_enabled')
+                ->where('api_key', $key)
+                ->limit(1)
+                ->get();
             self::$cache[$key] = !$row || (int) $row['is_enabled'] === 1;
             return self::$cache[$key];
         } catch (Throwable $exception) {

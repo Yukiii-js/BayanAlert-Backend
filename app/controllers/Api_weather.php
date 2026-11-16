@@ -103,7 +103,7 @@ class Api_weather extends Controller
             }
         }
 
-        header('Cache-Control: public, max-age=600');
+        $this->response->add_header('Cache-Control', 'public, max-age=600');
         api_response([
             'location' => [
                 'name' => 'Calapan City',

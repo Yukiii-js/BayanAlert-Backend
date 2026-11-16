@@ -144,11 +144,11 @@ class BrevoMailer
         $databaseSettings = [];
         $enabled = null;
         try {
-            $row = lava_instance()->db->raw(
-                'SELECT credential_encrypted, custom_parameters_json, is_enabled ' .
-                'FROM system_apis WHERE api_key = ? LIMIT 1',
-                ['brevo']
-            )->fetch(PDO::FETCH_ASSOC);
+            $row = lava_instance()->db->table('system_apis')
+                ->select('credential_encrypted, custom_parameters_json, is_enabled')
+                ->where('api_key', 'brevo')
+                ->limit(1)
+                ->get();
             if ($row) {
                 $enabled = (int) $row['is_enabled'] === 1;
                 if ($enabled) {

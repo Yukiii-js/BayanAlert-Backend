@@ -41,4 +41,16 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 | Used for adding middlewares
 |
 */
-$config['middlewares'] = [];
+require_once APP_DIR . 'middlewares/AuthMiddleware.php';
+require_once APP_DIR . 'middlewares/ActiveAccountMiddleware.php';
+require_once APP_DIR . 'middlewares/AdminMiddleware.php';
+require_once APP_DIR . 'middlewares/RateLimitMiddleware.php';
+require_once APP_DIR . 'middlewares/CorsMiddleware.php';
+
+$config['middlewares'] = [
+    'auth' => new AuthMiddleware(),
+    'active_account' => new ActiveAccountMiddleware(),
+    'admin' => new AdminMiddleware(),
+    'rate_limit' => new RateLimitMiddleware(),
+    'cors' => new CorsMiddleware(),
+];

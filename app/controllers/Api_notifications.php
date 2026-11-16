@@ -31,11 +31,12 @@ class Api_notifications extends Controller
     public function index()
     {
         try {
-            $notifications = $this->db->raw(
-                'SELECT notification_id, report_id, advisory_id, target_type, title, message, notification_type, is_read, created_at ' .
-                'FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
-                [$this->userId()]
-            )->fetchAll(PDO::FETCH_ASSOC);
+            $notifications = $this->db->table('notifications')
+                ->select('notification_id, report_id, advisory_id, target_type, title, message, notification_type, is_read, created_at')
+                ->where('user_id', $this->userId())
+                ->order_by('created_at', 'DESC')
+                ->limit(50)
+                ->get_all();
 
             foreach ($notifications as &$notification) {
                 if (!in_array($notification['target_type'], ['report', 'advisory'], true)) {
@@ -60,14 +61,15 @@ class Api_notifications extends Controller
         }
 
         try {
-            $this->db->raw(
-                'UPDATE notifications SET is_read = 1 WHERE notification_id = ? AND user_id = ?',
-                [(int) $id, $this->userId()]
-            );
-            $notification = $this->db->raw(
-                'SELECT notification_id FROM notifications WHERE notification_id = ? AND user_id = ?',
-                [(int) $id, $this->userId()]
-            )->fetch(PDO::FETCH_ASSOC);
+            $this->db->table('notifications')
+                ->where('notification_id', (int) $id)
+                ->where('user_id', $this->userId())
+                ->update(['is_read' => 1]);
+            $notification = $this->db->table('notifications')
+                ->select('notification_id')
+                ->where('notification_id', (int) $id)
+                ->where('user_id', $this->userId())
+                ->get();
 
             if (!$notification) {
                 api_error('Notification not found.', 404);
@@ -84,6 +86,10 @@ class Api_notifications extends Controller
     {
         $this->requireAdmin();
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'title' => 'required|max_length[200]',
+            'message' => 'required|max_length[5000]',
+        ]);
         $title = isset($input['title']) && is_string($input['title'])
             ? trim($input['title'])
             : '';
@@ -99,14 +105,32 @@ class Api_notifications extends Controller
         }
 
         try {
-            $insert = $this->db->raw(
-                "INSERT INTO notifications (user_id, title, message, notification_type, target_type, is_read, created_at) " .
-                "SELECT u.user_id, ?, ?, 'announcement', NULL, 0, NOW() " .
-                "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
-                "WHERE r.role_name IN ('resident', 'user') AND u.account_status = 'active'",
-                [$title, $message]
-            );
-            $recipientCount = (int) $insert->rowCount();
+            $recipients = [];
+            foreach (['resident', 'user'] as $roleName) {
+                $roleRecipients = $this->db->table('users')
+                    ->select('users.user_id')
+                    ->join('roles', 'roles.role_id = users.role_id')
+                    ->where('LOWER(roles.role_name)', $roleName)
+                    ->where('users.account_status', 'active')
+                    ->get_all();
+                foreach ($roleRecipients as $recipient) {
+                    $recipients[(int) $recipient['user_id']] = true;
+                }
+            }
+
+            $createdAt = gmdate('Y-m-d H:i:s');
+            foreach (array_keys($recipients) as $userId) {
+                $this->db->table('notifications')->insert([
+                    'user_id' => $userId,
+                    'title' => $title,
+                    'message' => $message,
+                    'notification_type' => 'announcement',
+                    'target_type' => null,
+                    'is_read' => 0,
+                    'created_at' => $createdAt,
+                ]);
+            }
+            $recipientCount = count($recipients);
 
             if ($recipientCount < 1) {
                 api_error('There are no active resident accounts to receive this announcement.', 409);

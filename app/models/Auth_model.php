@@ -9,18 +9,25 @@ class Auth_model extends Model {
     
     public function get_user_by_email_or_username($login)
     {
-        $result = $this->db->raw(
-            'SELECT users.user_id, users.role_id, users.full_name, users.password_hash, ' .
-            'users.account_status, users.status, users.suspension_reason, ' .
-            'users.email_verified_at, roles.role_name ' .
-            'FROM users INNER JOIN roles ON roles.role_id = users.role_id ' .
-            'WHERE LOWER(users.email) = LOWER(?) OR LOWER(users.username) = LOWER(?) LIMIT 1',
-            [$login, $login]
-        )->fetch(\PDO::FETCH_ASSOC);
+        $columns = get_table_column_names($this->db, $this->table);
+        $statusColumn = in_array('status', $columns, true)
+            ? 'users.status'
+            : 'NULL AS status';
+        $suspensionColumn = in_array('suspension_reason', $columns, true)
+            ? 'users.suspension_reason'
+            : 'NULL AS suspension_reason';
 
-        return is_array($result) && !empty($result)
-            ? $result
-            : null;
+        return $this->db->table($this->table)
+            ->join('roles', 'roles.role_id = users.role_id')
+            ->select(
+                'users.user_id, users.role_id, users.full_name, users.password_hash, ' .
+                'users.account_status, ' . $statusColumn . ', ' . $suspensionColumn . ', ' .
+                'users.email_verified_at, roles.role_name'
+            )
+            ->where('LOWER(users.email)', strtolower($login))
+            ->or_where('LOWER(users.username)', strtolower($login))
+            ->limit(1)
+            ->get();
     }
 
 

@@ -67,23 +67,49 @@ class OtpVerifications_model extends Model
 
     public function recordRegistrationCodeFailure($otpId)
     {
-        return $this->db->raw(
-            'UPDATE `otp_verifications` SET `used_at` = IF(`attempt_count` >= 4, UTC_TIMESTAMP(), `used_at`), ' .
-            '`attempt_count` = `attempt_count` + 1 ' .
-            'WHERE `otp_id` = ? AND `verification_type` = ? AND `used_at` IS NULL',
-            [(int) $otpId, 'registration']
-        );
+        $this->db->transaction();
+        try {
+            $updated = $this->db->table($this->table)
+                ->where('otp_id', (int) $otpId)
+                ->where('verification_type', 'registration')
+                ->where_null('used_at')
+                ->increment('attempt_count');
+            if ($updated < 1) {
+                $this->db->commit();
+                return 0;
+            }
+
+            $record = $this->db->table($this->table)
+                ->select('attempt_count')
+                ->where('otp_id', (int) $otpId)
+                ->where('verification_type', 'registration')
+                ->limit(1)
+                ->get();
+            if ($record && (int) ($record['attempt_count'] ?? 0) >= 5) {
+                $this->db->table($this->table)
+                    ->where('otp_id', (int) $otpId)
+                    ->where('verification_type', 'registration')
+                    ->where_null('used_at')
+                    ->update(['used_at' => gmdate('Y-m-d H:i:s')]);
+            }
+
+            $this->db->commit();
+            return $updated;
+        } catch (\Throwable $error) {
+            $this->db->roll_back();
+            throw $error;
+        }
     }
 
     public function consumeRegistrationCode($otpId)
     {
-        $result = $this->db->raw(
-            'UPDATE `otp_verifications` SET `used_at` = UTC_TIMESTAMP() ' .
-            'WHERE `otp_id` = ? AND `verification_type` = ? ' .
-            'AND `used_at` IS NULL AND `expires_at` > UTC_TIMESTAMP()',
-            [(int) $otpId, 'registration']
-        );
-        return $result->rowCount() === 1;
+        $now = gmdate('Y-m-d H:i:s');
+        return $this->db->table($this->table)
+            ->where('otp_id', (int) $otpId)
+            ->where('verification_type', 'registration')
+            ->where_null('used_at')
+            ->where('expires_at', '>', $now)
+            ->update(['used_at' => $now]) === 1;
     }
 
     public function deleteRegistrationCode($otpId)
@@ -142,9 +168,6 @@ class OtpVerifications_model extends Model
 
     public function get_columns()
     {
-        $columns = $this->db->raw('SHOW COLUMNS FROM `' . $this->table . '`')->fetchAll(PDO::FETCH_ASSOC);
-        return array_map(static function ($column) {
-            return $column['Field'];
-        }, $columns);
+        return get_table_column_names($this->db, $this->table);
     }
 }

@@ -365,6 +365,9 @@ $config['csrf_regenerate']         = FALSE;
 |   ];
 |
 */
+require_once APP_DIR . 'middlewares' . DIRECTORY_SEPARATOR . 'CorsMiddleware.php';
+$allowedOrigins = CorsMiddleware::allowedOrigins();
+
 $config['security_headers'] = [
     // ── CSP ──
     'csp_enabled' => false,
@@ -399,7 +402,7 @@ $config['security_headers'] = [
     // ── API ──
     'api_max_body' => 1048576,
     'cors' => [
-        'allowed_origins' => ['*'],
+        'allowed_origins' => $allowedOrigins,
         'credentials'     => false,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'headers'         => 'Authorization, Content-Type, X-Requested-With, Accept',

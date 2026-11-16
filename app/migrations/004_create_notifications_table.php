@@ -68,16 +68,15 @@ class Create_notifications_table
                 ->create_table('notifications');
         }
 
-        $columns = $this->_lava->db->raw('SHOW COLUMNS FROM `notifications`')
-            ->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($columns as $column) {
-            if ($column['Field'] === 'notification_type'
-                && stripos((string) $column['Type'], 'enum(') === 0) {
-                $this->_lava->db->raw(
-                    "ALTER TABLE `notifications` MODIFY `notification_type` VARCHAR(50) NOT NULL DEFAULT 'system'"
-                );
-                break;
-            }
+        if ($this->_lava->dbforge->column_exists('notifications', 'notification_type')) {
+            $this->_lava->dbforge->modify_column('notifications', [
+                'notification_type' => [
+                    'type' => 'VARCHAR',
+                    'constraint' => 50,
+                    'null' => FALSE,
+                    'default' => 'system',
+                ],
+            ]);
         }
     }
 

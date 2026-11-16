@@ -23,8 +23,9 @@ class Api_barangays extends Controller {
     }
 
     public function suggestions() {
-        $query = isset($_GET['q']) && is_string($_GET['q'])
-            ? trim($_GET['q'])
+        $search = $this->request->get('q');
+        $query = is_string($search)
+            ? trim($search)
             : '';
         if (mb_strlen($query) < 2) {
             api_response(['suggestions' => []]);
@@ -35,11 +36,13 @@ class Api_barangays extends Controller {
         try {
             $term = '%' . $query . '%';
             $suggestions = [];
-            $barangays = $this->db->raw(
-                'SELECT barangay_name, latitude, longitude FROM barangays ' .
-                'WHERE is_active = 1 AND barangay_name LIKE ? ORDER BY barangay_name LIMIT 8',
-                [$term]
-            )->fetchAll(PDO::FETCH_ASSOC);
+            $barangays = $this->db->table('barangays')
+                ->select('barangay_name, latitude, longitude')
+                ->where('is_active', 1)
+                ->like('barangay_name', $term)
+                ->order_by('barangay_name', 'ASC')
+                ->limit(8)
+                ->get_all();
 
             foreach ($barangays as $barangay) {
                 $suggestions[] = [
@@ -50,23 +53,24 @@ class Api_barangays extends Controller {
                 ];
             }
 
-            $columns = $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')
-                ->fetchAll(PDO::FETCH_COLUMN);
+            $columns = get_table_column_names($this->db, 'hazard_reports');
             if (in_array('address_details', $columns, true)) {
                 $coordinates = in_array('latitude', $columns, true)
                     && in_array('longitude', $columns, true);
-                $locationColumns = $coordinates
-                    ? 'latitude, longitude, '
-                    : 'NULL AS latitude, NULL AS longitude, ';
-                $locationGroup = $coordinates ? ', latitude, longitude' : '';
-                $addresses = $this->db->raw(
-                    'SELECT address_details, ' . $locationColumns .
-                    'MAX(submitted_at) AS last_reported FROM hazard_reports ' .
-                    'WHERE address_details LIKE ? AND address_details <> \'\' ' .
-                    'GROUP BY address_details' . $locationGroup . ' ' .
-                    'ORDER BY last_reported DESC LIMIT 8',
-                    [$term]
-                )->fetchAll(PDO::FETCH_ASSOC);
+                $select = $coordinates
+                    ? 'address_details, latitude, longitude, MAX(submitted_at) AS last_reported'
+                    : 'address_details, NULL AS latitude, NULL AS longitude, MAX(submitted_at) AS last_reported';
+                $groupBy = $coordinates
+                    ? ['address_details', 'latitude', 'longitude']
+                    : ['address_details'];
+                $addresses = $this->db->table('hazard_reports')
+                    ->select($select)
+                    ->like('address_details', $term)
+                    ->where('address_details', '!=', '')
+                    ->group_by($groupBy)
+                    ->order_by('last_reported', 'DESC')
+                    ->limit(8)
+                    ->get_all();
 
                 foreach ($addresses as $address) {
                     $label = trim((string) $address['address_details']);

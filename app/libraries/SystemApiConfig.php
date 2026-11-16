@@ -10,48 +10,39 @@ class SystemApiConfig
             return null;
         }
 
-        $iv = random_bytes(12);
-        $tag = '';
-        $ciphertext = openssl_encrypt(
-            $secret,
-            'aes-256-gcm',
-            self::encryptionKey(),
-            OPENSSL_RAW_DATA,
-            $iv,
-            $tag,
-            'bayanalert-system-api',
-            16
-        );
-        if (!is_string($ciphertext)) {
-            throw new RuntimeException('Unable to encrypt the API credential.');
-        }
-
-        return 'enc:v1:' . base64_encode($iv . $tag . $ciphertext);
+        self::assertEncryptionKey();
+        $encryption = load_class('encryption', 'libraries', 'aes-256-gcm');
+        return 'enc:v2:' . $encryption->encrypt($secret);
     }
 
-    public static function decryptSecret(?string $encrypted): string
+    private static function assertEncryptionKey(): void
     {
-        if ($encrypted === null || $encrypted === '') {
-            return '';
+        $configuredKey = (string) (getenv('APP_KEY') ?: '');
+        if ($configuredKey === '' && function_exists('config_item')) {
+            $configuredKey = (string) config_item('encryption_key');
         }
-        if (strpos($encrypted, 'enc:v1:') !== 0) {
-            throw new RuntimeException('An API credential has an unsupported encrypted format.');
+        if (strlen($configuredKey) < 32) {
+            throw new RuntimeException('APP_KEY must be configured with at least 32 characters to store API credentials securely.');
         }
+    }
+
+    private static function decryptLegacySecret(string $encrypted): string
+    {
+        self::assertEncryptionKey();
+        $configuredKey = (string) (getenv('APP_KEY') ?: config_item('encryption_key'));
 
         $payload = base64_decode(substr($encrypted, 7), true);
         if (!is_string($payload) || strlen($payload) < 29) {
             throw new RuntimeException('An API credential could not be decoded.');
         }
-        $iv = substr($payload, 0, 12);
-        $tag = substr($payload, 12, 16);
-        $ciphertext = substr($payload, 28);
+
         $secret = openssl_decrypt(
-            $ciphertext,
+            substr($payload, 28),
             'aes-256-gcm',
-            self::encryptionKey(),
+            hash('sha256', $configuredKey, true),
             OPENSSL_RAW_DATA,
-            $iv,
-            $tag,
+            substr($payload, 0, 12),
+            substr($payload, 12, 16),
             'bayanalert-system-api'
         );
         if (!is_string($secret)) {
@@ -59,6 +50,33 @@ class SystemApiConfig
         }
 
         return $secret;
+    }
+
+    public static function decryptSecret(?string $encrypted): string
+    {
+        if ($encrypted === null || $encrypted === '') {
+            return '';
+        }
+        if (strpos($encrypted, 'enc:v2:') === 0) {
+            self::assertEncryptionKey();
+            $encoded = substr($encrypted, 7);
+            $payload = base64_decode($encoded, true);
+            if (!is_string($payload) || strlen($payload) < 29) {
+                throw new RuntimeException('An API credential could not be decoded.');
+            }
+
+            $encryption = load_class('encryption', 'libraries', 'aes-256-gcm');
+            $secret = $encryption->decrypt($encoded);
+            if (!is_string($secret)) {
+                throw new RuntimeException('Unable to decrypt an API credential. Check APP_KEY stability.');
+            }
+            return $secret;
+        }
+        if (strpos($encrypted, 'enc:v1:') === 0) {
+            return self::decryptLegacySecret($encrypted);
+        }
+
+        throw new RuntimeException('An API credential has an unsupported encrypted format.');
     }
 
     public static function resolvePublicHttpsEndpoint(string $url): array
@@ -190,16 +208,4 @@ class SystemApiConfig
         ];
     }
 
-    private static function encryptionKey(): string
-    {
-        $configuredKey = (string) (getenv('APP_KEY') ?: '');
-        if ($configuredKey === '' && function_exists('config_item')) {
-            $configuredKey = (string) config_item('encryption_key');
-        }
-        if (strlen($configuredKey) < 32) {
-            throw new RuntimeException('APP_KEY must be configured with at least 32 characters to store API credentials securely.');
-        }
-
-        return hash('sha256', $configuredKey, true);
-    }
 }

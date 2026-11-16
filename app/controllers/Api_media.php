@@ -35,20 +35,20 @@ class Api_media extends Controller
         $start = 0;
         $end = $fileSize - 1;
         $status = 200;
-        $range = trim((string) ($_SERVER['HTTP_RANGE'] ?? ''));
+        $range = trim((string) ($this->request->header('Range') ?? ''));
 
         if ($range !== '') {
             if ($fileSize === 0 ||
                 preg_match('/\Abytes=(\d*)-(\d*)\z/', $range, $matches) !== 1 ||
                 ($matches[1] === '' && $matches[2] === '')) {
-                header('Content-Range: bytes */' . $fileSize);
+                $this->response->add_header('Content-Range', 'bytes */' . $fileSize);
                 api_error('Requested evidence byte range is not satisfiable.', 416);
             }
 
             if ($matches[1] === '') {
                 $suffixLength = (int) $matches[2];
                 if ($suffixLength < 1) {
-                    header('Content-Range: bytes */' . $fileSize);
+                    $this->response->add_header('Content-Range', 'bytes */' . $fileSize);
                     api_error('Requested evidence byte range is not satisfiable.', 416);
                 }
                 $start = max(0, $fileSize - $suffixLength);
@@ -61,12 +61,12 @@ class Api_media extends Controller
             }
 
             if ($start >= $fileSize || $start > $end) {
-                header('Content-Range: bytes */' . $fileSize);
+                $this->response->add_header('Content-Range', 'bytes */' . $fileSize);
                 api_error('Requested evidence byte range is not satisfiable.', 416);
             }
 
             $status = 206;
-            header('Content-Range: bytes ' . $start . '-' . $end . '/' . $fileSize);
+            $this->response->add_header('Content-Range', 'bytes ' . $start . '-' . $end . '/' . $fileSize);
         }
 
         $file = fopen($filePath, 'rb');
@@ -79,13 +79,16 @@ class Api_media extends Controller
             api_error('Evidence file could not be opened.', 500);
         }
 
-        http_response_code($status);
-        header('Content-Type: ' . $expectedMimeType);
-        header('Content-Length: ' . ($end - $start + 1));
-        header('Content-Disposition: inline; filename="' . $filename . '"');
-        header('Accept-Ranges: bytes');
-        header('Cache-Control: public, max-age=86400, immutable');
-        header('X-Content-Type-Options: nosniff');
+        $this->response->set_status_code($status);
+        $this->response->add_header([
+            'Content-Type' => $expectedMimeType,
+            'Content-Length' => $end - $start + 1,
+            'Content-Disposition' => 'inline; filename="' . $filename . '"',
+            'Accept-Ranges' => 'bytes',
+            'Cache-Control' => 'public, max-age=86400, immutable',
+            'X-Content-Type-Options' => 'nosniff'
+        ]);
+        $this->response->send_headers();
 
         $remaining = $end - $start + 1;
         while ($remaining > 0) {

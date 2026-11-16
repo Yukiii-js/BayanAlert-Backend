@@ -12,6 +12,10 @@ class Api_auth extends Controller {
 
     public function login() {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'username' => 'required|max_length[150]',
+            'password' => 'required|max_length[255]',
+        ]);
         $username = isset($input['username']) && is_string($input['username']) ? trim($input['username']) : '';
         $password = isset($input['password']) && is_string($input['password']) ? $input['password'] : '';
         $expectedRole = 'resident';
@@ -90,7 +94,12 @@ class Api_auth extends Controller {
             'sub'       => $user['user_id']
         ];
 
-        $token = generate_jwt_token($tokenPayload, 86400 * 7); // 7 days
+        try {
+            $token = generate_jwt_token($tokenPayload, 86400 * 7);
+        } catch (RuntimeException $e) {
+            error_log('JWT token issuance is unavailable: ' . $e->getMessage());
+            api_error('Authentication service is unavailable.', 503);
+        }
 
         api_response([
             'token' => $token,
@@ -122,6 +131,14 @@ class Api_auth extends Controller {
 
     public function register() {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'full_name' => 'required|max_length[160]',
+            'email' => 'required|valid_email|max_length[254]',
+            'username' => 'required|min_length[3]|max_length[100]',
+            'password' => 'required|min_length[8]|max_length[255]',
+            'confirm_password' => 'required|matches[password]',
+            'barangay_id' => 'required|numeric',
+        ]);
 
         $full_name = isset($input['full_name']) && is_string($input['full_name'])
             ? trim($input['full_name']) : '';
@@ -197,11 +214,14 @@ class Api_auth extends Controller {
 
             $preRegistrationVerification = null;
             try {
-                $preRegistrationVerification = $this->db->raw(
-                    'SELECT verification_id, verified_at FROM registration_email_verifications ' .
-                    'WHERE email = ? AND expires_at > NOW() LIMIT 1',
-                    [$email]
-                )->fetch(\PDO::FETCH_ASSOC);
+                $preRegistrationVerification = $this->db->table('registration_email_verifications')
+                    ->select('verification_id, verified_at, expires_at')
+                    ->where('email', $email)
+                    ->limit(1)
+                    ->get();
+                if (!$this->isFutureTimestamp($preRegistrationVerification['expires_at'] ?? null)) {
+                    $preRegistrationVerification = null;
+                }
             } catch (\Throwable $verificationStoreError) {
                 error_log('Pre-registration email verification lookup unavailable: ' . $verificationStoreError->getMessage());
             }
@@ -262,6 +282,9 @@ class Api_auth extends Controller {
     public function verifyEmail()
     {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'token' => 'required|exact_length[64]',
+        ]);
         $token = isset($input['token']) && is_string($input['token']) ? trim($input['token']) : '';
         if (!preg_match('/^[a-f0-9]{64}$/i', $token)) {
             api_error('This email verification link is invalid or expired.', 400);
@@ -271,24 +294,35 @@ class Api_auth extends Controller {
         try {
             $verification = null;
             if ($this->tableExists('email_verification_tokens')) {
-                $verification = $this->db->raw(
-                    'SELECT user_id FROM email_verification_tokens WHERE token_hash = ? AND expires_at > NOW() LIMIT 1',
-                    [hash('sha256', $token)]
-                )->fetch(\PDO::FETCH_ASSOC);
+                $verification = $this->db->table('email_verification_tokens')
+                    ->select('user_id, expires_at')
+                    ->where('token_hash', hash('sha256', $token))
+                    ->limit(1)
+                    ->get();
+                if (!$this->isFutureTimestamp($verification['expires_at'] ?? null)) {
+                    $verification = null;
+                }
             }
 
             if ($verification) {
                 $userId = (int) $verification['user_id'];
-                $this->db->raw(
-                    'UPDATE users SET email_verified_at = COALESCE(email_verified_at, NOW()) WHERE user_id = ?',
-                    [$userId]
-                );
-                $this->db->raw('DELETE FROM email_verification_tokens WHERE user_id = ?', [$userId]);
+                $userRecord = $this->db->table('users')
+                    ->select('email_verified_at')
+                    ->where('user_id', $userId)
+                    ->limit(1)
+                    ->get();
+                if ($userRecord && empty($userRecord['email_verified_at'])) {
+                    $this->db->table('users')
+                        ->where('user_id', $userId)
+                        ->update(['email_verified_at' => gmdate('Y-m-d H:i:s')]);
+                }
+                $this->db->table('email_verification_tokens')->where('user_id', $userId)->delete();
 
-                $user = $this->db->raw(
-                    'SELECT account_status, email FROM users WHERE user_id = ? LIMIT 1',
-                    [$userId]
-                )->fetch(\PDO::FETCH_ASSOC);
+                $user = $this->db->table('users')
+                    ->select('account_status, email')
+                    ->where('user_id', $userId)
+                    ->limit(1)
+                    ->get();
                 $accountStatus = $user['account_status'] ?? 'pending';
                 api_response([
                     'email_verified' => true,
@@ -302,26 +336,28 @@ class Api_auth extends Controller {
 
             $registrationVerification = null;
             if ($this->tableExists('registration_email_verifications')) {
-                $registrationVerification = $this->db->raw(
-                    'SELECT email FROM registration_email_verifications ' .
-                    'WHERE token_hash = ? AND expires_at > NOW() LIMIT 1',
-                    [hash('sha256', $token)]
-                )->fetch(\PDO::FETCH_ASSOC);
+                $registrationVerification = $this->db->table('registration_email_verifications')
+                    ->select('email, expires_at')
+                    ->where('token_hash', hash('sha256', $token))
+                    ->limit(1)
+                    ->get();
+                if (!$this->isFutureTimestamp($registrationVerification['expires_at'] ?? null)) {
+                    $registrationVerification = null;
+                }
             }
             if (!$registrationVerification) {
                 api_error('This email verification link is invalid or expired.', 400);
                 return;
             }
 
-            $this->db->raw(
-                'UPDATE registration_email_verifications SET verified_at = COALESCE(verified_at, NOW()) ' .
-                'WHERE email = ?',
-                [$registrationVerification['email']]
-            );
-            $this->db->raw(
-                'UPDATE users SET email_verified_at = COALESCE(email_verified_at, NOW()) WHERE email = ?',
-                [$registrationVerification['email']]
-            );
+            $this->db->table('registration_email_verifications')
+                ->where('email', $registrationVerification['email'])
+                ->where_null('verified_at')
+                ->update(['verified_at' => gmdate('Y-m-d H:i:s')]);
+            $this->db->table('users')
+                ->where('email', $registrationVerification['email'])
+                ->where_null('email_verified_at')
+                ->update(['email_verified_at' => gmdate('Y-m-d H:i:s')]);
             $user = $this->Auth_model->get_user_by_email($registrationVerification['email']);
             $accountStatus = $user['account_status'] ?? 'not_registered';
             api_response([
@@ -342,6 +378,9 @@ class Api_auth extends Controller {
     public function sendRegistrationVerification()
     {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'email' => 'required|valid_email|max_length[254]',
+        ]);
         $email = isset($input['email']) && is_string($input['email'])
             ? strtolower(trim($input['email']))
             : '';
@@ -363,12 +402,13 @@ class Api_auth extends Controller {
             $this->ensureOtpVerificationTable();
             $this->ensureRegistrationEmailVerificationTable();
             $stage = 'existing verification lookup';
-            $alreadyVerified = $this->db->raw(
-                'SELECT verification_id FROM registration_email_verifications ' .
-                'WHERE email = ? AND verified_at IS NOT NULL AND expires_at > NOW() LIMIT 1',
-                [$email]
-            )->fetch(\PDO::FETCH_ASSOC);
-            if ($alreadyVerified) {
+            $alreadyVerified = $this->db->table('registration_email_verifications')
+                ->select('verification_id, expires_at')
+                ->where('email', $email)
+                ->where_not_null('verified_at')
+                ->limit(1)
+                ->get();
+            if ($alreadyVerified && $this->isFutureTimestamp($alreadyVerified['expires_at'] ?? null)) {
                 api_response([
                     'email_sent' => false,
                     'email_verified' => true,
@@ -433,6 +473,10 @@ class Api_auth extends Controller {
     public function verifyRegistrationOtp()
     {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'email' => 'required|valid_email|max_length[254]',
+            'code' => 'required|exact_length[6]|numeric',
+        ]);
         $email = isset($input['email']) && is_string($input['email'])
             ? strtolower(trim($input['email']))
             : '';
@@ -479,13 +523,11 @@ class Api_auth extends Controller {
                     api_error('The verification code is invalid or expired. Request a new code and try again.', 400);
                     return;
                 }
-                $this->db->raw(
-                    'INSERT INTO registration_email_verifications ' .
-                    '(email, token_hash, expires_at, verified_at, created_at) ' .
-                    'VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY), NOW(), NOW()) ' .
-                    'ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), ' .
-                    'expires_at = VALUES(expires_at), verified_at = NOW(), created_at = NOW()',
-                    [$email, hash('sha256', random_bytes(32))]
+                $this->saveRegistrationEmailVerification(
+                    $email,
+                    hash('sha256', random_bytes(32)),
+                    gmdate('Y-m-d H:i:s', time() + 86400),
+                    gmdate('Y-m-d H:i:s')
                 );
                 $this->db->commit();
             } catch (\Throwable $workflowError) {
@@ -518,6 +560,9 @@ class Api_auth extends Controller {
     public function resendVerificationEmail()
     {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'email' => 'required|valid_email|max_length[254]',
+        ]);
         $email = isset($input['email']) && is_string($input['email'])
             ? strtolower(trim($input['email']))
             : '';
@@ -533,13 +578,14 @@ class Api_auth extends Controller {
                 && in_array(strtolower(trim((string) ($user['role_name'] ?? ''))), ['resident', 'user'], true)
                 && empty($user['email_verified_at'])) {
                 $this->ensureUserEmailVerificationTable();
-                $recentToken = $this->db->raw(
-                    'SELECT verification_id FROM email_verification_tokens ' .
-                    'WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) LIMIT 1',
-                    [(int) $user['user_id']]
-                )->fetch(\PDO::FETCH_ASSOC);
+                $recentToken = $this->db->table('email_verification_tokens')
+                    ->select('verification_id, created_at')
+                    ->where('user_id', (int) $user['user_id'])
+                    ->order_by('created_at', 'DESC')
+                    ->limit(1)
+                    ->get();
 
-                if (!$recentToken) {
+                if (!$recentToken || !$this->isRecentTimestamp($recentToken['created_at'] ?? null, 60)) {
                     $result = $this->issueVerificationEmail(
                         (int) $user['user_id'],
                         $email,
@@ -553,37 +599,37 @@ class Api_auth extends Controller {
                 }
             } elseif (!$user) {
                 $this->ensureRegistrationEmailVerificationTable();
-                $registrationVerification = $this->db->raw(
-                    'SELECT verified_at, ' .
-                    '(created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND)) AS is_recent ' .
-                    'FROM registration_email_verifications WHERE email = ? LIMIT 1',
-                    [$email]
-                )->fetch(\PDO::FETCH_ASSOC);
+                $registrationVerification = $this->db->table('registration_email_verifications')
+                    ->select('verified_at, created_at')
+                    ->where('email', $email)
+                    ->limit(1)
+                    ->get();
 
                 if ($registrationVerification && !empty($registrationVerification['verified_at'])) {
                     api_response(['email_sent' => false], 200, 'This email address is already verified. You can continue creating your account.');
                     return;
                 }
 
-                if ($registrationVerification && !empty($registrationVerification['is_recent'])) {
+                if ($registrationVerification
+                    && $this->isRecentTimestamp($registrationVerification['created_at'] ?? null, 60)) {
                     api_response(['email_sent' => true], 200, 'A verification email was sent recently. Check your inbox.');
                     return;
                 }
 
                 $token = bin2hex(random_bytes(32));
-                $this->db->raw(
-                    'INSERT INTO registration_email_verifications (email, token_hash, expires_at, verified_at, created_at) ' .
-                    'VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY), NULL, NOW()) ' .
-                    'ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), expires_at = VALUES(expires_at), ' .
-                    'verified_at = NULL, created_at = NOW()',
-                    [$email, hash('sha256', $token)]
+                $tokenHash = hash('sha256', $token);
+                $this->saveRegistrationEmailVerification(
+                    $email,
+                    $tokenHash,
+                    gmdate('Y-m-d H:i:s', time() + 86400),
+                    null
                 );
                 $result = (new BrevoMailer())->sendVerificationEmail($email, '', $token);
                 if (!$result['success']) {
-                    $this->db->raw(
-                        'DELETE FROM registration_email_verifications WHERE email = ? AND token_hash = ?',
-                        [$email, hash('sha256', $token)]
-                    );
+                    $this->db->table('registration_email_verifications')
+                        ->where('email', $email)
+                        ->where('token_hash', $tokenHash)
+                        ->delete();
                     api_error($result['error'] ?? 'Verification email could not be sent. Please try again later.', 503);
                     return;
                 }
@@ -602,6 +648,9 @@ class Api_auth extends Controller {
     public function requestPasswordReset()
     {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'email' => 'required|valid_email|max_length[254]',
+        ]);
         $email = isset($input['email']) && is_string($input['email'])
             ? strtolower(trim($input['email']))
             : '';
@@ -624,24 +673,26 @@ class Api_auth extends Controller {
 
             $this->ensurePasswordResetTable();
             $userId = (int) $user['user_id'];
-            $recentRequest = $this->db->raw(
-                'SELECT reset_id FROM password_reset_tokens ' .
-                'WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) LIMIT 1',
-                [$userId]
-            )->fetch(\PDO::FETCH_ASSOC);
-            if ($recentRequest) {
+            $recentRequest = $this->db->table('password_reset_tokens')
+                ->select('reset_id, created_at')
+                ->where('user_id', $userId)
+                ->order_by('created_at', 'DESC')
+                ->limit(1)
+                ->get();
+            if ($recentRequest && $this->isRecentTimestamp($recentRequest['created_at'] ?? null, 60)) {
                 api_response(['email_sent' => true], 200, $genericMessage);
                 return;
             }
 
             $token = bin2hex(random_bytes(32));
             $tokenHash = hash('sha256', $token);
-            $this->db->raw('DELETE FROM password_reset_tokens WHERE user_id = ?', [$userId]);
-            $this->db->raw(
-                'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at) ' .
-                'VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR), NOW())',
-                [$userId, $tokenHash]
-            );
+            $this->db->table('password_reset_tokens')->where('user_id', $userId)->delete();
+            $this->db->table('password_reset_tokens')->insert([
+                'user_id' => $userId,
+                'token_hash' => $tokenHash,
+                'expires_at' => gmdate('Y-m-d H:i:s', time() + 3600),
+                'created_at' => gmdate('Y-m-d H:i:s'),
+            ]);
 
             $result = (new BrevoMailer())->sendPasswordResetEmail(
                 $email,
@@ -649,10 +700,10 @@ class Api_auth extends Controller {
                 $token
             );
             if (!$result['success']) {
-                $this->db->raw(
-                    'DELETE FROM password_reset_tokens WHERE user_id = ? AND token_hash = ?',
-                    [$userId, $tokenHash]
-                );
+                $this->db->table('password_reset_tokens')
+                    ->where('user_id', $userId)
+                    ->where('token_hash', $tokenHash)
+                    ->delete();
                 error_log('Password reset email could not be sent for user ID ' . $userId . '.');
                 api_error($result['error'] ?? 'Password reset email could not be sent. Please try again later.', 503);
                 return;
@@ -668,6 +719,11 @@ class Api_auth extends Controller {
     public function resetPassword()
     {
         $input = get_request_input();
+        api_validate_input(is_array($input) ? $input : [], [
+            'token' => 'required|exact_length[64]',
+            'password' => 'required|min_length[8]|max_length[255]',
+            'confirm_password' => 'required|matches[password]',
+        ]);
         $token = isset($input['token']) && is_string($input['token']) ? trim($input['token']) : '';
         $password = isset($input['password']) && is_string($input['password']) ? $input['password'] : '';
         $confirmPassword = isset($input['confirm_password']) && is_string($input['confirm_password'])
@@ -690,34 +746,43 @@ class Api_auth extends Controller {
         try {
             $this->ensurePasswordResetTable();
             $tokenHash = hash('sha256', $token);
-            $reset = $this->db->raw(
-                'SELECT t.user_id FROM password_reset_tokens t ' .
-                'INNER JOIN users u ON u.user_id = t.user_id ' .
-                'INNER JOIN roles r ON r.role_id = u.role_id ' .
-                'WHERE t.token_hash = ? AND t.expires_at > NOW() ' .
-                'AND u.email_verified_at IS NOT NULL AND r.role_name IN (\'resident\', \'user\') LIMIT 1',
-                [$tokenHash]
-            )->fetch(\PDO::FETCH_ASSOC);
-            if (!$reset) {
+            $reset = $this->db->table('password_reset_tokens')
+                ->select('password_reset_tokens.user_id, password_reset_tokens.expires_at, users.email_verified_at, roles.role_name')
+                ->join('users', 'users.user_id = password_reset_tokens.user_id')
+                ->join('roles', 'roles.role_id = users.role_id')
+                ->where('password_reset_tokens.token_hash', $tokenHash)
+                ->limit(1)
+                ->get();
+            if (!$reset
+                || !$this->isFutureTimestamp($reset['expires_at'] ?? null)
+                || empty($reset['email_verified_at'])
+                || !in_array(strtolower((string) ($reset['role_name'] ?? '')), ['resident', 'user'], true)) {
                 api_error('This password reset link is invalid or expired.', 400);
                 return;
             }
 
             $userId = (int) $reset['user_id'];
-            $claimedToken = $this->db->raw(
-                'DELETE FROM password_reset_tokens WHERE token_hash = ? AND expires_at > NOW()',
-                [$tokenHash]
-            );
-            if ($claimedToken->rowCount() !== 1) {
-                api_error('This password reset link is invalid or expired.', 400);
-                return;
-            }
+            $this->db->transaction();
+            try {
+                $claimedToken = $this->db->table('password_reset_tokens')
+                    ->where('token_hash', $tokenHash)
+                    ->where('expires_at', '>', gmdate('Y-m-d H:i:s'))
+                    ->delete();
+                if ($claimedToken !== 1) {
+                    $this->db->roll_back();
+                    api_error('This password reset link is invalid or expired.', 400);
+                    return;
+                }
 
-            $this->db->raw(
-                'UPDATE users SET password_hash = ? WHERE user_id = ?',
-                [password_hash($password, PASSWORD_DEFAULT), $userId]
-            );
-            $this->db->raw('DELETE FROM password_reset_tokens WHERE user_id = ?', [$userId]);
+                $this->db->table('users')
+                    ->where('user_id', $userId)
+                    ->update(['password_hash' => password_hash($password, PASSWORD_DEFAULT)]);
+                $this->db->table('password_reset_tokens')->where('user_id', $userId)->delete();
+                $this->db->commit();
+            } catch (\Throwable $resetError) {
+                $this->db->roll_back();
+                throw $resetError;
+            }
 
             api_response(['password_reset' => true], 200, 'Your password has been reset. You can now sign in.');
         } catch (\Throwable $e) {
@@ -730,18 +795,21 @@ class Api_auth extends Controller {
     {
         $this->ensureUserEmailVerificationTable();
         $token = bin2hex(random_bytes(32));
-        $this->db->raw('DELETE FROM email_verification_tokens WHERE user_id = ?', [$userId]);
-        $this->db->raw(
-            'INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY))',
-            [$userId, hash('sha256', $token)]
-        );
+        $tokenHash = hash('sha256', $token);
+        $this->db->table('email_verification_tokens')->where('user_id', $userId)->delete();
+        $this->db->table('email_verification_tokens')->insert([
+            'user_id' => $userId,
+            'token_hash' => $tokenHash,
+            'expires_at' => gmdate('Y-m-d H:i:s', time() + 86400),
+            'created_at' => gmdate('Y-m-d H:i:s'),
+        ]);
 
         $result = (new BrevoMailer())->sendVerificationEmail($email, $fullName, $token);
         if (!$result['success']) {
-            $this->db->raw(
-                'DELETE FROM email_verification_tokens WHERE user_id = ? AND token_hash = ?',
-                [$userId, hash('sha256', $token)]
-            );
+            $this->db->table('email_verification_tokens')
+                ->where('user_id', $userId)
+                ->where('token_hash', $tokenHash)
+                ->delete();
         }
 
         return $result;
@@ -749,24 +817,59 @@ class Api_auth extends Controller {
 
     private function ensureUserEmailVerificationTable()
     {
-        if ($this->tableExists('email_verification_tokens')) {
-            return;
+        if (!$this->tableExists('email_verification_tokens')) {
+            throw new \RuntimeException(
+                'The email_verification_tokens table is missing. Apply migration 006 before enabling verification.'
+            );
+        }
+    }
+
+    private function saveRegistrationEmailVerification($email, $tokenHash, $expiresAt, $verifiedAt)
+    {
+        $existing = $this->db->table('registration_email_verifications')
+            ->select('verification_id')
+            ->where('email', $email)
+            ->limit(1)
+            ->get();
+        $data = [
+            'token_hash' => $tokenHash,
+            'expires_at' => $expiresAt,
+            'verified_at' => $verifiedAt,
+            'created_at' => gmdate('Y-m-d H:i:s'),
+        ];
+
+        if ($existing) {
+            return $this->db->table('registration_email_verifications')
+                ->where('email', $email)
+                ->update($data);
         }
 
-        $this->db->raw(
-            'CREATE TABLE IF NOT EXISTS email_verification_tokens (' .
-            'verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,' .
-            'user_id INT UNSIGNED NOT NULL,' .
-            'token_hash CHAR(64) NOT NULL,' .
-            'expires_at DATETIME NOT NULL,' .
-            'created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
-            'PRIMARY KEY (verification_id),' .
-            'UNIQUE KEY email_verification_user_unique (user_id),' .
-            'UNIQUE KEY email_verification_token_unique (token_hash),' .
-            'CONSTRAINT email_verification_user_fk FOREIGN KEY (user_id) ' .
-            'REFERENCES users (user_id) ON DELETE CASCADE' .
-            ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
-        );
+        return $this->db->table('registration_email_verifications')->insert(array_merge(
+            ['email' => $email],
+            $data
+        ));
+    }
+
+    private function isFutureTimestamp($value)
+    {
+        if (!is_string($value) || trim($value) === '') {
+            return false;
+        }
+        $timestamp = strtotime($value . ' UTC');
+        return $timestamp !== false && $timestamp > time();
+    }
+
+    private function isRecentTimestamp($value, $seconds)
+    {
+        if (!is_string($value) || trim($value) === '') {
+            return false;
+        }
+        $timestamp = strtotime($value . ' UTC');
+        if ($timestamp === false) {
+            return false;
+        }
+        $age = time() - $timestamp;
+        return $age >= 0 && $age < (int) $seconds;
     }
 
     private function registrationDatabaseErrorMessage($stage, $sqlState, $driverCode)
@@ -793,8 +896,7 @@ class Api_auth extends Controller {
             throw new \RuntimeException('The otp_verifications table is missing.');
         }
 
-        $columns = $this->db->raw('SHOW COLUMNS FROM `otp_verifications`')
-            ->fetchAll(\PDO::FETCH_COLUMN);
+        $columns = get_table_column_names($this->db, 'otp_verifications');
         $required = ['otp_id', 'user_id', 'email', 'code_hash', 'verification_type', 'expires_at', 'used_at', 'attempt_count', 'created_at'];
         $missing = array_values(array_diff($required, $columns));
         if ($missing) {
@@ -810,19 +912,8 @@ class Api_auth extends Controller {
             return;
         }
 
-        $this->db->raw(
-            'CREATE TABLE IF NOT EXISTS registration_email_verifications (' .
-            'verification_id INT UNSIGNED NOT NULL AUTO_INCREMENT,' .
-            'email VARCHAR(150) NOT NULL,' .
-            'token_hash CHAR(64) NOT NULL,' .
-            'expires_at DATETIME NOT NULL,' .
-            'verified_at DATETIME NULL,' .
-            'created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
-            'PRIMARY KEY (verification_id),' .
-            'UNIQUE KEY registration_email_verification_email_unique (email),' .
-            'UNIQUE KEY registration_email_verification_token_unique (token_hash),' .
-            'KEY registration_email_verification_expiry_idx (expires_at)' .
-            ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        throw new RuntimeException(
+            'The registration_email_verifications table is missing. Apply migration 007 before enabling verification.'
         );
     }
 
@@ -832,31 +923,13 @@ class Api_auth extends Controller {
             return;
         }
 
-        $this->db->raw(
-            'CREATE TABLE IF NOT EXISTS password_reset_tokens (' .
-            'reset_id INT UNSIGNED NOT NULL AUTO_INCREMENT,' .
-            'user_id INT UNSIGNED NOT NULL,' .
-            'token_hash CHAR(64) NOT NULL,' .
-            'expires_at DATETIME NOT NULL,' .
-            'created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
-            'PRIMARY KEY (reset_id),' .
-            'UNIQUE KEY password_reset_user_unique (user_id),' .
-            'UNIQUE KEY password_reset_token_unique (token_hash),' .
-            'KEY password_reset_expiry_idx (expires_at),' .
-            'CONSTRAINT password_reset_user_fk FOREIGN KEY (user_id) ' .
-            'REFERENCES users (user_id) ON DELETE CASCADE' .
-            ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        throw new RuntimeException(
+            'The password_reset_tokens table is missing. Apply the password-reset migration before enabling password reset.'
         );
     }
 
     private function tableExists(string $tableName): bool
     {
-        $table = $this->db->raw(
-            'SELECT 1 FROM information_schema.tables ' .
-            'WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1',
-            [$tableName]
-        )->fetch(\PDO::FETCH_NUM);
-
-        return is_array($table) && !empty($table);
+        return database_table_exists($this->db, $tableName);
     }
 }

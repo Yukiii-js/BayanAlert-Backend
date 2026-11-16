@@ -78,7 +78,7 @@ $config['refresh_token_expiration'] = 604800;
 | default value: a secret that ships with the framework is public and
 | lets anyone forge valid tokens.
 |
-| Provide it through the environment variable LAVALUST_JWT_SECRET.
+| Provide it through the environment variable JWT_SECRET.
 | It must be at least 32 random characters. Generate one with:
 |
 |   php -r "echo bin2hex(random_bytes(32));"
@@ -100,7 +100,7 @@ $config['jwt_secret'] = getenv('JWT_SECRET') ?: '';
 | default value. It is used to hash refresh tokens before they are stored
 | in the database and must be different from jwt_secret.
 |
-| Provide it through the environment variable LAVALUST_REFRESH_TOKEN_KEY.
+| Provide it through the environment variable REFRESH_TOKEN_KEY.
 | It must be at least 32 random characters. Generate one with:
 |
 |   php -r "echo bin2hex(random_bytes(32));"
@@ -145,7 +145,37 @@ $config['users_table'] = 'users';
 | a browser, so set your real domain in production.
 |
 */
-$config['allow_origin'] = '*';
+$configuredOrigins = getenv('FRONTEND_ORIGINS');
+$allowedOrigins = [];
+if ($configuredOrigins) {
+    foreach (explode(',', $configuredOrigins) as $configuredOrigin) {
+        $configuredOrigin = trim($configuredOrigin);
+        $originParts = parse_url($configuredOrigin);
+        if (isset($originParts['scheme'], $originParts['host'])
+            && in_array(strtolower($originParts['scheme']), ['http', 'https'], true)
+            && !isset($originParts['user'])
+            && !isset($originParts['pass'])
+            && !isset($originParts['query'])
+            && !isset($originParts['fragment'])
+            && (!isset($originParts['path']) || $originParts['path'] === '' || $originParts['path'] === '/')) {
+            $allowedOrigins[] = $originParts['scheme'] . '://' . $originParts['host']
+                . (isset($originParts['port']) ? ':' . $originParts['port'] : '');
+        }
+    }
+}
+if (!$allowedOrigins) {
+    $allowedOrigins = ['https://bayanalert-frontend-2.onrender.com', 'http://localhost:5173', 'http://127.0.0.1:5173'];
+}
+$frontendUrl = getenv('FRONTEND_URL');
+if ($frontendUrl) {
+    $frontendOrigin = parse_url($frontendUrl);
+    if (isset($frontendOrigin['scheme'], $frontendOrigin['host'])
+        && in_array(strtolower($frontendOrigin['scheme']), ['http', 'https'], true)) {
+        $allowedOrigins[] = $frontendOrigin['scheme'] . '://' . $frontendOrigin['host']
+            . (isset($frontendOrigin['port']) ? ':' . $frontendOrigin['port'] : '');
+    }
+}
+$config['allow_origin'] = reset($allowedOrigins);
 
 /*
 |--------------------------------------------------------------------------

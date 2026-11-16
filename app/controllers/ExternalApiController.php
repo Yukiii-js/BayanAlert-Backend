@@ -16,9 +16,7 @@ class ExternalApiController extends Controller
         try {
             $service = new ExternalHazardService();
             $feed = $service->getResidentFeed();
-            if (!headers_sent()) {
-                header('Cache-Control: public, max-age=30, stale-while-revalidate=60');
-            }
+            $this->response->add_header('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
             api_response($feed);
         } catch (Throwable $exception) {
             error_log('External resident feed failed: ' . $exception->getMessage());

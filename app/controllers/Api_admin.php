@@ -303,19 +303,17 @@ class Api_admin extends Controller
                 && (string) $record['status'] !== (string) $validation['data']['status']
                 && !empty($record['user_id'])) {
                 try {
-                    $this->db->raw(
-                        'INSERT INTO notifications (user_id, report_id, target_type, title, message, notification_type, is_read, created_at) ' .
-                        'VALUES (?, ?, ?, ?, ?, ?, 0, NOW())',
-                        [
-                            (int) $record['user_id'],
-                            (int) $record['report_id'],
-                            'report',
-                            'Report status updated',
-                            'Your report ' . ($record['reference_number'] ?: '#' . $record['report_id']) .
-                                ' is now ' . str_replace('_', ' ', strtolower((string) $validation['data']['status'])) . '.',
-                            'report_status'
-                        ]
-                    );
+                    $this->db->table('notifications')->insert([
+                        'user_id' => (int) $record['user_id'],
+                        'report_id' => (int) $record['report_id'],
+                        'target_type' => 'report',
+                        'title' => 'Report status updated',
+                        'message' => 'Your report ' . ($record['reference_number'] ?: '#' . $record['report_id']) .
+                            ' is now ' . str_replace('_', ' ', strtolower((string) $validation['data']['status'])) . '.',
+                        'notification_type' => 'report_status',
+                        'is_read' => 0,
+                        'created_at' => gmdate('Y-m-d H:i:s'),
+                    ]);
                 } catch (\Throwable $notificationError) {
                     error_log('Report status notification failed for report ' . $record['report_id'] . ': ' . $notificationError->getMessage());
                     $message .= ' Resident notification delivery failed.';

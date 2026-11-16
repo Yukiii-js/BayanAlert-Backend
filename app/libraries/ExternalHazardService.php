@@ -163,10 +163,11 @@ class ExternalHazardService
 
     private function isSyncDue(string $key): bool
     {
-        $row = $this->db->raw(
-            'SELECT sync_interval_minutes, last_synced_at, rate_limit_until FROM system_apis WHERE api_key = ? LIMIT 1',
-            [$key]
-        )->fetch(PDO::FETCH_ASSOC);
+        $row = $this->db->table('system_apis')
+            ->select('sync_interval_minutes, last_synced_at, rate_limit_until')
+            ->where('api_key', $key)
+            ->limit(1)
+            ->get();
         if (!$row) {
             return true;
         }
@@ -186,15 +187,14 @@ class ExternalHazardService
 
     private function getCachedHazardEvents(): array
     {
-        $rows = $this->db->raw(
-            'SELECT id, source, external_event_id, hazard_type, title, severity_level, magnitude_or_score, depth_km, ' .
-            'latitude, longitude, distance_to_municipality_km, affected_population, event_timestamp, raw_payload_json, ' .
-            'is_published_to_residents FROM external_hazard_events ' .
-            'WHERE event_timestamp >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 60 DAY)'
-        )->fetchAll(PDO::FETCH_ASSOC);
+        $cutoff = gmdate('Y-m-d H:i:s', time() - 60 * 86400);
+        $rows = $this->db->table('external_hazard_events')
+            ->select('id, source, external_event_id, hazard_type, title, severity_level, magnitude_or_score, depth_km, latitude, longitude, distance_to_municipality_km, affected_population, event_timestamp, raw_payload_json, is_published_to_residents')
+            ->where('event_timestamp', '>=', $cutoff)
+            ->get_all();
 
         $events = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $rawPayload = json_decode((string) ($row['raw_payload_json'] ?? ''), true);
             $rawPayload = is_array($rawPayload) ? $rawPayload : [];
             $properties = is_array($rawPayload['properties'] ?? null)
@@ -249,12 +249,11 @@ class ExternalHazardService
 
     private function getResidentProviderStatuses(array $events): array
     {
-        $rows = $this->db->raw(
-            'SELECT api_key, last_status, last_http_status, last_latency_ms, rate_limit_until, last_synced_at, last_error_message ' .
-            'FROM system_apis'
-        )->fetchAll(PDO::FETCH_ASSOC);
+        $rows = $this->db->table('system_apis')
+            ->select('api_key, last_status, last_http_status, last_latency_ms, rate_limit_until, last_synced_at, last_error_message')
+            ->get_all();
         $statusByKey = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $key = (string) $row['api_key'];
             if (!in_array($key, ['usgs', 'gdacs', 'typhoon'], true)) {
                 continue;
@@ -316,12 +315,13 @@ class ExternalHazardService
 
     private function getCachedProviderCounts(): array
     {
-        $rows = $this->db->raw(
-            'SELECT source, hazard_type, distance_to_municipality_km, event_timestamp, raw_payload_json ' .
-            'FROM external_hazard_events WHERE event_timestamp >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 60 DAY)'
-        )->fetchAll(PDO::FETCH_ASSOC);
+        $cutoff = gmdate('Y-m-d H:i:s', time() - 60 * 86400);
+        $rows = $this->db->table('external_hazard_events')
+            ->select('source, hazard_type, distance_to_municipality_km, event_timestamp, raw_payload_json')
+            ->where('event_timestamp', '>=', $cutoff)
+            ->get_all();
         $counts = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $source = strtoupper((string) $row['source']);
             $hazardType = strtoupper((string) $row['hazard_type']);
             $rawPayload = json_decode((string) ($row['raw_payload_json'] ?? ''), true);
@@ -387,7 +387,7 @@ class ExternalHazardService
             return;
         }
 
-        $this->db->raw('START TRANSACTION');
+        $this->db->transaction();
         try {
             foreach ($events as $event) {
                 $timestamp = strtotime((string) ($event['event_timestamp'] ?? ''));
@@ -397,43 +397,43 @@ class ExternalHazardService
                     $event['raw_payload'] ?? $event,
                     JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
                 );
-                $this->db->raw(
-                    'INSERT INTO external_hazard_events ' .
-                    '(source, external_event_id, hazard_type, title, severity_level, magnitude_or_score, depth_km, latitude, longitude, ' .
-                    'distance_to_municipality_km, affected_population, event_timestamp, raw_payload_json, is_published_to_residents, created_at, updated_at) ' .
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW()) ' .
-                    'ON DUPLICATE KEY UPDATE source = VALUES(source), hazard_type = VALUES(hazard_type), title = VALUES(title), ' .
-                    'severity_level = VALUES(severity_level), magnitude_or_score = VALUES(magnitude_or_score), depth_km = VALUES(depth_km), ' .
-                    'latitude = VALUES(latitude), longitude = VALUES(longitude), distance_to_municipality_km = VALUES(distance_to_municipality_km), ' .
-                    'affected_population = VALUES(affected_population), event_timestamp = VALUES(event_timestamp), ' .
-                    'raw_payload_json = VALUES(raw_payload_json), updated_at = NOW()',
-                    [
-                        substr(strtoupper((string) ($event['source'] ?? 'UNKNOWN')), 0, 16),
-                        substr($externalId, 0, 128),
-                        substr(strtolower(trim((string) ($event['hazard_type'] ?? 'alert'))), 0, 24),
-                        substr((string) ($event['title'] ?? 'Hazard event'), 0, 255),
-                        substr(strtolower((string) ($event['severity_level'] ?? 'green')), 0, 16),
-                        isset($event['magnitude_or_score']) && is_numeric($event['magnitude_or_score'])
-                            ? (float) $event['magnitude_or_score']
-                            : null,
-                        isset($event['depth_km']) && is_numeric($event['depth_km']) ? (float) $event['depth_km'] : null,
-                        isset($event['latitude']) && is_numeric($event['latitude']) ? (float) $event['latitude'] : null,
-                        isset($event['longitude']) && is_numeric($event['longitude']) ? (float) $event['longitude'] : null,
-                        isset($event['distance_to_municipality_km']) && is_numeric($event['distance_to_municipality_km'])
-                            ? (float) $event['distance_to_municipality_km']
-                            : null,
-                        isset($event['affected_population']) && is_numeric($event['affected_population'])
-                            ? (int) $event['affected_population']
-                            : null,
-                        $eventDate,
-                        is_string($rawJson) ? $rawJson : '{}',
-                        !empty($event['is_published_to_residents']) ? 1 : 0,
-                    ]
-                );
+                $source = substr(strtoupper((string) ($event['source'] ?? 'UNKNOWN')), 0, 16);
+                $externalId = substr($externalId, 0, 128);
+                $data = [
+                    'source' => $source,
+                    'external_event_id' => $externalId,
+                    'hazard_type' => substr(strtolower(trim((string) ($event['hazard_type'] ?? 'alert'))), 0, 24),
+                    'title' => substr((string) ($event['title'] ?? 'Hazard event'), 0, 255),
+                    'severity_level' => substr(strtolower((string) ($event['severity_level'] ?? 'green')), 0, 16),
+                    'magnitude_or_score' => isset($event['magnitude_or_score']) && is_numeric($event['magnitude_or_score']) ? (float) $event['magnitude_or_score'] : null,
+                    'depth_km' => isset($event['depth_km']) && is_numeric($event['depth_km']) ? (float) $event['depth_km'] : null,
+                    'latitude' => isset($event['latitude']) && is_numeric($event['latitude']) ? (float) $event['latitude'] : null,
+                    'longitude' => isset($event['longitude']) && is_numeric($event['longitude']) ? (float) $event['longitude'] : null,
+                    'distance_to_municipality_km' => isset($event['distance_to_municipality_km']) && is_numeric($event['distance_to_municipality_km']) ? (float) $event['distance_to_municipality_km'] : null,
+                    'affected_population' => isset($event['affected_population']) && is_numeric($event['affected_population']) ? (int) $event['affected_population'] : null,
+                    'event_timestamp' => $eventDate,
+                    'raw_payload_json' => is_string($rawJson) ? $rawJson : '{}',
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ];
+                $existing = $this->db->table('external_hazard_events')
+                    ->select('id')
+                    ->where('source', $source)
+                    ->where('external_event_id', $externalId)
+                    ->limit(1)
+                    ->get();
+                if ($existing) {
+                    $this->db->table('external_hazard_events')
+                        ->where('id', (int) $existing['id'])
+                        ->update($data);
+                } else {
+                    $data['is_published_to_residents'] = !empty($event['is_published_to_residents']) ? 1 : 0;
+                    $data['created_at'] = gmdate('Y-m-d H:i:s');
+                    $this->db->table('external_hazard_events')->insert($data);
+                }
             }
-            $this->db->raw('COMMIT');
+            $this->db->commit();
         } catch (Throwable $exception) {
-            $this->db->raw('ROLLBACK');
+            $this->db->roll_back();
             throw $exception;
         }
     }
@@ -564,9 +564,15 @@ class ExternalHazardService
     public function publishHighSeverityNotifications(array $events): int
     {
         $createdNotifications = 0;
-        $this->db->raw('START TRANSACTION');
+        $this->db->transaction();
 
         try {
+            $residents = $this->db->table('users')
+                ->select('users.user_id')
+                ->join('roles', 'roles.role_id = users.role_id')
+                ->in('roles.role_name', ['resident', 'user'])
+                ->where('users.account_status', 'active')
+                ->get_all();
             foreach ($events as $event) {
                 if (strtoupper((string) ($event['source'] ?? '')) !== 'GDACS') {
                     continue;
@@ -582,30 +588,33 @@ class ExternalHazardService
 
                 $timestamp = strtotime((string) ($event['event_timestamp'] ?? ''));
                 $eventDate = $timestamp === false ? gmdate('Y-m-d H:i:s') : gmdate('Y-m-d H:i:s', $timestamp);
-                $insert = $this->db->raw(
-                    'INSERT IGNORE INTO external_hazard_events ' .
-                    '(source, external_event_id, hazard_type, title, severity_level, magnitude_or_score, latitude, longitude, ' .
-                    'distance_to_municipality_km, affected_population, event_timestamp, raw_payload_json, is_published_to_residents, created_at, updated_at) ' .
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())',
-                    [
-                        'GDACS',
-                        substr((string) $event['id'], 0, 128),
-                        substr($hazardType ?: 'ALERT', 0, 24),
-                        substr((string) ($event['title'] ?? 'Regional hazard alert'), 0, 255),
-                        strtolower((string) ($event['severity_level'] ?? 'green')),
-                        isset($event['magnitude_or_score']) ? (float) $event['magnitude_or_score'] : null,
-                        isset($event['latitude']) ? (float) $event['latitude'] : null,
-                        isset($event['longitude']) ? (float) $event['longitude'] : null,
-                        isset($event['distance_to_municipality_km']) ? (float) $event['distance_to_municipality_km'] : null,
-                        isset($event['affected_population']) ? (int) $event['affected_population'] : null,
-                        $eventDate,
-                        json_encode($event['raw_payload'] ?? $event, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
-                    ]
-                );
-
-                if ((int) $insert->rowCount() !== 1) {
+                $externalId = substr((string) $event['id'], 0, 128);
+                $existing = $this->db->table('external_hazard_events')
+                    ->select('id')
+                    ->where('source', 'GDACS')
+                    ->where('external_event_id', $externalId)
+                    ->limit(1)
+                    ->get();
+                if ($existing) {
                     continue;
                 }
+                $this->db->table('external_hazard_events')->insert([
+                    'source' => 'GDACS',
+                    'external_event_id' => $externalId,
+                    'hazard_type' => substr($hazardType ?: 'ALERT', 0, 24),
+                    'title' => substr((string) ($event['title'] ?? 'Regional hazard alert'), 0, 255),
+                    'severity_level' => strtolower((string) ($event['severity_level'] ?? 'green')),
+                    'magnitude_or_score' => isset($event['magnitude_or_score']) ? (float) $event['magnitude_or_score'] : null,
+                    'latitude' => isset($event['latitude']) ? (float) $event['latitude'] : null,
+                    'longitude' => isset($event['longitude']) ? (float) $event['longitude'] : null,
+                    'distance_to_municipality_km' => isset($event['distance_to_municipality_km']) ? (float) $event['distance_to_municipality_km'] : null,
+                    'affected_population' => isset($event['affected_population']) ? (int) $event['affected_population'] : null,
+                    'event_timestamp' => $eventDate,
+                    'raw_payload_json' => json_encode($event['raw_payload'] ?? $event, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
+                    'is_published_to_residents' => 1,
+                    'created_at' => gmdate('Y-m-d H:i:s'),
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ]);
 
                 $title = $isTyphoon
                     ? 'Tropical cyclone advisory: ' . (string) ($event['title'] ?? 'Regional alert')
@@ -619,24 +628,28 @@ class ExternalHazardService
                     . $distance
                     . ' Open Regional Advisories for details.';
 
-                $notificationInsert = $this->db->raw(
-                    "INSERT INTO notifications (user_id, report_id, advisory_id, target_type, title, message, notification_type, is_read, created_at) " .
-                    "SELECT u.user_id, NULL, ?, 'advisory', ?, ?, 'external_hazard', 0, NOW() " .
-                    "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
-                    "WHERE r.role_name IN ('resident', 'user') AND u.account_status = 'active'",
-                    [
-                        substr((string) $event['id'], 0, 128),
-                        mb_substr($title, 0, 200),
-                        mb_substr($message, 0, 5000),
-                    ]
-                );
-                $createdNotifications += (int) $notificationInsert->rowCount();
+                foreach ($residents ?: [] as $resident) {
+                    $notificationId = $this->db->table('notifications')->insert([
+                        'user_id' => (int) $resident['user_id'],
+                        'report_id' => null,
+                        'advisory_id' => substr((string) $event['id'], 0, 128),
+                        'target_type' => 'advisory',
+                        'title' => mb_substr($title, 0, 200),
+                        'message' => mb_substr($message, 0, 5000),
+                        'notification_type' => 'external_hazard',
+                        'is_read' => 0,
+                        'created_at' => gmdate('Y-m-d H:i:s'),
+                    ]);
+                    if ($notificationId) {
+                        $createdNotifications++;
+                    }
+                }
             }
 
-            $this->db->raw('COMMIT');
+            $this->db->commit();
             return $createdNotifications;
         } catch (Throwable $exception) {
-            $this->db->raw('ROLLBACK');
+            $this->db->roll_back();
             throw $exception;
         }
     }
@@ -645,24 +658,20 @@ class ExternalHazardService
     {
         $this->ensureApiConfigs();
         $this->ensureSystemApiRows();
-        $rows = $this->db->raw(
-            'SELECT api_key, display_name, endpoint_url, is_enabled, last_synced_at, last_status, ' .
-            'last_error_message, rate_limit_until, records_cached FROM external_api_configs'
-        )->fetchAll(PDO::FETCH_ASSOC);
+        $rows = $this->db->table('external_api_configs')
+            ->select('api_key, display_name, endpoint_url, is_enabled, last_synced_at, last_status, last_error_message, rate_limit_until, records_cached')
+            ->get_all();
         $saved = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $saved[$row['api_key']] = $row;
         }
 
-        $systemRows = $this->db->raw(
-            'SELECT id, api_key, api_name, category, endpoint_url, credential_encrypted, auth_header_type, ' .
-            'auth_header_name, sync_interval_minutes, custom_parameters_json, is_enabled, is_custom, last_status, ' .
-            'last_http_status, last_latency_ms, rate_limit_until, last_synced_at, last_error_message ' .
-            'FROM system_apis'
-        )->fetchAll(PDO::FETCH_ASSOC);
+        $systemRows = $this->db->table('system_apis')
+            ->select('id, api_key, api_name, category, endpoint_url, credential_encrypted, auth_header_type, auth_header_name, sync_interval_minutes, custom_parameters_json, is_enabled, is_custom, last_status, last_http_status, last_latency_ms, rate_limit_until, last_synced_at, last_error_message')
+            ->get_all();
         $cachedProviderCounts = $this->getCachedProviderCounts();
         $systemByKey = [];
-        foreach ($systemRows as $row) {
+        foreach ($systemRows ?: [] as $row) {
             $systemByKey[$row['api_key']] = $row;
         }
 
@@ -753,12 +762,7 @@ class ExternalHazardService
         $this->lastHttpStatus = null;
         $this->lastLatencyMs = null;
         $this->lastDiagnostics = [];
-        $lockName = 'bayanalert_external_sync_' . $normalized;
-        $lock = $this->db->raw('SELECT GET_LOCK(?, 0) AS acquired', [$lockName])
-            ->fetch(PDO::FETCH_ASSOC);
-        if ((int) ($lock['acquired'] ?? 0) !== 1) {
-            throw new RuntimeException('An external API sync is already in progress.');
-        }
+        $lockToken = $this->acquireSyncLock($normalized);
 
         try {
             if (in_array($normalized, ['usgs', 'gdacs', 'typhoon'], true)) {
@@ -802,8 +806,40 @@ class ExternalHazardService
             $this->saveSyncStatus($normalized, 'error', $message, 0);
             throw new RuntimeException($message, 0, $exception);
         } finally {
-            $this->db->raw('SELECT RELEASE_LOCK(?)', [$lockName]);
+            $this->releaseSyncLock($normalized, $lockToken);
         }
+    }
+
+    private function acquireSyncLock(string $key): string
+    {
+        $token = bin2hex(random_bytes(24));
+        $now = gmdate('Y-m-d H:i:s');
+        $updated = $this->db->table('system_apis')
+            ->where('api_key', $key)
+            ->where('sync_lock_expires_at', '<=', $now)
+            ->update([
+                'sync_lock_token' => $token,
+                'sync_lock_expires_at' => gmdate('Y-m-d H:i:s', time() + 900),
+                'updated_at' => $now,
+            ]);
+        if ($updated !== 1) {
+            throw new RuntimeException('An external API sync is already in progress, or migration 018 is not applied.');
+        }
+
+        return $token;
+    }
+
+    private function releaseSyncLock(string $key, string $token): void
+    {
+        $now = gmdate('Y-m-d H:i:s');
+        $this->db->table('system_apis')
+            ->where('api_key', $key)
+            ->where('sync_lock_token', $token)
+            ->update([
+                'sync_lock_token' => null,
+                'sync_lock_expires_at' => $now,
+                'updated_at' => $now,
+            ]);
     }
 
     public function updateConfig(string $key, array $input): array
@@ -824,17 +860,31 @@ class ExternalHazardService
         $enabled = in_array($value, [true, 1, '1'], true) ? 1 : 0;
         $defaults = $catalog[$normalized];
         $this->ensureSystemApiRows();
-        $this->db->raw(
-            'INSERT INTO external_api_configs (api_key, display_name, endpoint_url, is_enabled, last_status, created_at, updated_at) ' .
-            'VALUES (?, ?, ?, ?, ?, NOW(), NOW()) ' .
-            'ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), endpoint_url = VALUES(endpoint_url), ' .
-            'is_enabled = VALUES(is_enabled), updated_at = NOW()',
-            [$normalized, $defaults['display_name'], $defaults['endpoint_url'], $enabled, 'idle']
-        );
-        $this->db->raw(
-            'UPDATE system_apis SET is_enabled = ?, updated_at = NOW() WHERE api_key = ?',
-            [$enabled, $normalized]
-        );
+        $now = gmdate('Y-m-d H:i:s');
+        $config = $this->db->table('external_api_configs')
+            ->select('api_key')
+            ->where('api_key', $normalized)
+            ->limit(1)
+            ->get();
+        $configData = [
+            'display_name' => $defaults['display_name'],
+            'endpoint_url' => $defaults['endpoint_url'],
+            'is_enabled' => $enabled,
+            'updated_at' => $now,
+        ];
+        if ($config) {
+            $this->db->table('external_api_configs')
+                ->where('api_key', $normalized)
+                ->update($configData);
+        } else {
+            $this->db->table('external_api_configs')->insert(array_merge(
+                ['api_key' => $normalized, 'last_status' => 'idle', 'created_at' => $now],
+                $configData
+            ));
+        }
+        $this->db->table('system_apis')
+            ->where('api_key', $normalized)
+            ->update(['is_enabled' => $enabled, 'updated_at' => $now]);
         ExternalApiConfig::forget($normalized);
         unset($this->providerEnabledCache[$normalized]);
 
@@ -1112,12 +1162,23 @@ class ExternalHazardService
     {
         $this->migrateLegacyProviderRows();
         foreach ($this->providerCatalog() as $key => $provider) {
-            $this->db->raw(
-                'INSERT IGNORE INTO external_api_configs ' .
-                '(api_key, display_name, endpoint_url, is_enabled, last_status, created_at, updated_at) ' .
-                'VALUES (?, ?, ?, 1, ?, NOW(), NOW())',
-                [$key, $provider['display_name'], $provider['endpoint_url'], 'idle']
-            );
+            $existing = $this->db->table('external_api_configs')
+                ->select('api_key')
+                ->where('api_key', $key)
+                ->limit(1)
+                ->get();
+            if (!$existing) {
+                $now = gmdate('Y-m-d H:i:s');
+                $this->db->table('external_api_configs')->insert([
+                    'api_key' => $key,
+                    'display_name' => $provider['display_name'],
+                    'endpoint_url' => $provider['endpoint_url'],
+                    'is_enabled' => 1,
+                    'last_status' => 'idle',
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
         }
     }
 
@@ -1127,18 +1188,9 @@ class ExternalHazardService
             return;
         }
         $this->legacyProviderMigrationApplied = true;
-        $this->db->raw(
-            'DELETE FROM external_api_configs WHERE api_key IN (?, ?, ?)',
-            ['nasa_eonet', 'reliefweb', 'open_meteo']
-        );
-        $this->db->raw(
-            'DELETE FROM system_apis WHERE api_key IN (?, ?, ?)',
-            ['nasa_eonet', 'reliefweb', 'open_meteo']
-        );
-        $this->db->raw(
-            'DELETE FROM external_hazard_events WHERE source IN (?, ?, ?)',
-            ['NASA_EONET', 'RELIEFWEB', 'OPEN_METEO']
-        );
+        $this->db->table('external_api_configs')->in('api_key', ['nasa_eonet', 'reliefweb', 'open_meteo'])->delete();
+        $this->db->table('system_apis')->in('api_key', ['nasa_eonet', 'reliefweb', 'open_meteo'])->delete();
+        $this->db->table('external_hazard_events')->in('source', ['NASA_EONET', 'RELIEFWEB', 'OPEN_METEO'])->delete();
 
         ExternalApiConfig::forget('nasa_eonet');
         ExternalApiConfig::forget('reliefweb');
@@ -1150,10 +1202,11 @@ class ExternalHazardService
     {
         $this->migrateLegacyProviderRows();
         foreach ($this->providerCatalog() as $key => $provider) {
-            $legacyConfig = $this->db->raw(
-                'SELECT is_enabled, endpoint_url FROM external_api_configs WHERE api_key = ? LIMIT 1',
-                [$key]
-            )->fetch(PDO::FETCH_ASSOC);
+            $legacyConfig = $this->db->table('external_api_configs')
+                ->select('is_enabled, endpoint_url')
+                ->where('api_key', $key)
+                ->limit(1)
+                ->get();
             $enabled = (!$legacyConfig || (int) $legacyConfig['is_enabled'] === 1) ? 1 : 0;
             $endpoint = !empty($legacyConfig['endpoint_url'])
                 ? $legacyConfig['endpoint_url']
@@ -1164,22 +1217,28 @@ class ExternalHazardService
             if ($key === 'brevo' && $endpoint === 'https://api.brevo.com/v3/account') {
                 $endpoint = $provider['endpoint_url'];
             }
-            $this->db->raw(
-                'INSERT IGNORE INTO system_apis ' .
-                '(api_key, api_name, category, endpoint_url, auth_header_type, auth_header_name, sync_interval_minutes, ' .
-                'is_enabled, is_custom, last_status, created_at, updated_at) ' .
-                'VALUES (?, ?, ?, ?, ?, ?, 60, ?, 0, ?, NOW(), NOW())',
-                [
-                    $key,
-                    $provider['display_name'],
-                    $provider['category'],
-                    $endpoint,
-                    $provider['auth_header_type'],
-                    $provider['auth_header_name'],
-                    $enabled,
-                    'idle',
-                ]
-            );
+            $systemApi = $this->db->table('system_apis')
+                ->select('id')
+                ->where('api_key', $key)
+                ->limit(1)
+                ->get();
+            if (!$systemApi) {
+                $now = gmdate('Y-m-d H:i:s');
+                $this->db->table('system_apis')->insert([
+                    'api_key' => $key,
+                    'api_name' => $provider['display_name'],
+                    'category' => $provider['category'],
+                    'endpoint_url' => $endpoint,
+                    'auth_header_type' => $provider['auth_header_type'],
+                    'auth_header_name' => $provider['auth_header_name'],
+                    'sync_interval_minutes' => 60,
+                    'is_enabled' => $enabled,
+                    'is_custom' => 0,
+                    'last_status' => 'idle',
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
         }
     }
 
@@ -1187,11 +1246,11 @@ class ExternalHazardService
     {
         $defaults = $this->providerCatalog()[$key];
         try {
-            $row = $this->db->raw(
-                'SELECT endpoint_url, credential_encrypted, auth_header_type, auth_header_name, custom_parameters_json ' .
-                'FROM system_apis WHERE api_key = ? LIMIT 1',
-                [$key]
-            )->fetch(PDO::FETCH_ASSOC);
+            $row = $this->db->table('system_apis')
+                ->select('endpoint_url, credential_encrypted, auth_header_type, auth_header_name, custom_parameters_json')
+                ->where('api_key', $key)
+                ->limit(1)
+                ->get();
         } catch (Throwable $exception) {
             $errorInfo = $exception instanceof PDOException ? ($exception->errorInfo ?? []) : [];
             $sqlState = (string) ($errorInfo[0] ?? $exception->getCode());
@@ -1367,27 +1426,47 @@ class ExternalHazardService
     private function saveSyncStatus(string $key, string $status, ?string $error, int $records): void
     {
         $provider = $this->providerCatalog()[$key];
-        $this->db->raw(
-            'INSERT INTO external_api_configs ' .
-            '(api_key, display_name, endpoint_url, is_enabled, last_synced_at, last_status, last_error_message, rate_limit_until, records_cached, created_at, updated_at) ' .
-            'VALUES (?, ?, ?, 1, NOW(), ?, ?, ?, ?, NOW(), NOW()) ' .
-            'ON DUPLICATE KEY UPDATE last_synced_at = VALUES(last_synced_at), last_status = VALUES(last_status), ' .
-            'last_error_message = VALUES(last_error_message), rate_limit_until = VALUES(rate_limit_until), ' .
-            "records_cached = IF(VALUES(last_status) = 'online', VALUES(records_cached), records_cached), updated_at = NOW()",
-            [$key, $provider['display_name'], $provider['endpoint_url'], $status, $error, $this->lastRetryAfterAt, $records]
-        );
-        $this->db->raw(
-            'UPDATE system_apis SET last_status = ?, last_http_status = ?, last_latency_ms = ?, ' .
-            'last_synced_at = NOW(), last_error_message = ?, rate_limit_until = ?, updated_at = NOW() WHERE api_key = ?',
-            [
-                $status,
-                $this->lastHttpStatus,
-                $this->lastLatencyMs,
-                $error,
-                $this->lastRetryAfterAt,
-                $key,
-            ]
-        );
+        $now = gmdate('Y-m-d H:i:s');
+        $config = $this->db->table('external_api_configs')
+            ->select('api_key')
+            ->where('api_key', $key)
+            ->limit(1)
+            ->get();
+        $configData = [
+            'last_synced_at' => $now,
+            'last_status' => $status,
+            'last_error_message' => $error,
+            'rate_limit_until' => $this->lastRetryAfterAt,
+            'updated_at' => $now,
+        ];
+        if ($status === 'online') {
+            $configData['records_cached'] = $records;
+        }
+        if ($config) {
+            $this->db->table('external_api_configs')
+                ->where('api_key', $key)
+                ->update($configData);
+        } else {
+            $this->db->table('external_api_configs')->insert(array_merge([
+                'api_key' => $key,
+                'display_name' => $provider['display_name'],
+                'endpoint_url' => $provider['endpoint_url'],
+                'is_enabled' => 1,
+                'records_cached' => 0,
+                'created_at' => $now,
+            ], $configData));
+        }
+        $this->db->table('system_apis')
+            ->where('api_key', $key)
+            ->update([
+                'last_status' => $status,
+                'last_http_status' => $this->lastHttpStatus,
+                'last_latency_ms' => $this->lastLatencyMs,
+                'last_synced_at' => $now,
+                'last_error_message' => $error,
+                'rate_limit_until' => $this->lastRetryAfterAt,
+                'updated_at' => $now,
+            ]);
         $this->providerEnabledCache = [];
     }
 

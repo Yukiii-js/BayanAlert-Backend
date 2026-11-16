@@ -200,6 +200,8 @@ you use a different file name or path, set `DB_SSL_CA` to its mounted path.
 Without a CA, the connection is encrypted but the server certificate is not
 verified. Keep the certificate on the backend only; do not commit it or put
 database credentials in frontend environment variables.
+Set `APP_ENV=production` and `FRONTEND_ORIGINS` in Render to allow only the deployed browser origins;
+localhost origins are included in development only.
 
 ### Calapan weather forecast
 
@@ -235,12 +237,19 @@ After importing the BayanAlert schema, run
 to seed the 62 Calapan barangays and approximate map centers, add report and barangay coordinates,
 enable three-strike account moderation, and add resolved-report timestamps. The script is
 safe to re-run and is required before using the location suggestions and moderation APIs.
+For LavaLust-managed deployments, migration
+`app/migrations/017_add_user_moderation_columns.php` provisions the moderation columns;
+runtime requests only validate that the migration has been applied. Migration
+`app/migrations/018_add_external_api_sync_lock.php` adds the Query Builder-backed lease used
+to prevent overlapping provider syncs.
 Set a stable `APP_KEY` of at least 32 characters before saving API credentials: credentials in
 the registry are encrypted with AES-256-GCM and cannot be recovered if this key is changed.
 Edits to built-in endpoint, credential, authentication, and parameter settings are used by the
 backend's live weather, regional-hazard, and transactional-email requests, not only by the
 connection-test button. Brevo connection tests check account authentication without sending an email;
 email delivery uses the configured SMTP endpoint.
+For JSON request bodies, API write handlers can use `api_validate_input($input, $rules)` to pass
+decoded payloads through LavaLust's form-validation library and return structured HTTP 422 errors.
 Connection tests are run on demand. WeatherAPI and Brevo use credentials stored in API Management
 or the `WEATHERAPI_KEY` and `BREVO_API_KEY` backend environment variables; their keys remain
 server-side. USGS and GDACS are public feeds and do not require API keys. The Leaflet map uses the
@@ -271,8 +280,18 @@ the key is required for CSRF protection and must not be committed. Generate one
 with `php -r "echo bin2hex(random_bytes(32));"`. When the frontend is hosted
 separately, set its build-time `VITE_API_URL` to this backend's public `/api`
 base URL and redeploy the frontend. Set the backend's `FRONTEND_URL` to the
-frontend origin so API responses and login preflight requests receive the correct
-CORS headers before database startup.
+frontend origin for verification links, and set `FRONTEND_ORIGINS` to a
+comma-separated list of exact frontend origins allowed by CORS (for example,
+`https://bayanalert-frontend-2.onrender.com`). The backend defaults to the
+deployed frontend and local Vite origins when `FRONTEND_ORIGINS` is unset.
+Configure `JWT_SECRET` with at least 32 random characters; the backend now fails
+closed rather than using a source-controlled signing key. Generate it with
+`php -r "echo bin2hex(random_bytes(32));"`. Rotating this key invalidates all
+existing login tokens, so users will need to sign in again.
+Admin API routes are grouped behind LavaLust authentication, active-account,
+and administrator middleware. Login and email-verification/password-reset
+routes use the framework cache rate limiter and return `Retry-After` and
+`X-RateLimit-*` headers when the client-address/path limit is reached.
 
 ### Persistent evidence uploads
 
@@ -430,12 +449,18 @@ with `{"email":"..."}`, `POST /api/auth/verify-registration-otp` with
 and `POST /api/auth/resend-verification` with `{"email":"..."}` for registered
 accounts. The sender address must be verified with Brevo.
 
+Provision the verification tables before deployment using the native LavaLust
+migrations `app/migrations/006_create_email_verification_tokens.php`,
+`app/migrations/007_create_registration_email_verifications.php`, and
+`app/migrations/016_create_otp_verifications.php`. Runtime requests do not
+create or alter these tables.
+
 Resident sign-in provides a password-reset link for verified resident accounts.
 Reset tokens are stored hashed, expire after one hour, are single-use, and are
 rate-limited to one email per account per minute. The API creates
-`password_reset_tokens` on first use; if the database account cannot create
-tables, run [`manual_migration_010_password_reset_tokens.sql`](./manual_migration_010_password_reset_tokens.sql)
-in the selected database. The reset routes are
+`password_reset_tokens` through migration
+`app/migrations/015_create_password_reset_tokens.php`; apply it before enabling
+password reset. The reset routes are
 `POST /api/auth/request-password-reset` and `POST /api/auth/reset-password`.
 
 Before deploying the admin user-deletion workflow to an existing database, run

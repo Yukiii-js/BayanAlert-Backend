@@ -50,11 +50,19 @@ class Create_email_verification_tokens
             ->add_foreign_key('user_id', 'users', 'user_id', 'CASCADE')
             ->create_table('email_verification_tokens');
 
-        $this->_lava->db->raw(
-            "UPDATE users SET email_verified_at = NOW() " .
-            "WHERE account_status = 'active' AND email_verified_at IS NULL " .
-            "AND role_id IN (SELECT role_id FROM roles WHERE role_name IN ('resident', 'user'))"
-        );
+        $residentRoles = $this->_lava->db->table('roles')
+            ->select('role_id')
+            ->where('role_name', 'resident')
+            ->or_where('role_name', 'user')
+            ->get_all();
+        $verifiedAt = gmdate('Y-m-d H:i:s');
+        foreach ($residentRoles as $role) {
+            $this->_lava->db->table('users')
+                ->where('role_id', (int) $role['role_id'])
+                ->where('account_status', 'active')
+                ->where_null('email_verified_at')
+                ->update(['email_verified_at' => $verifiedAt]);
+        }
     }
 
     public function down()

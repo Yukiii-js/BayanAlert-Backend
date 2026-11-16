@@ -24,22 +24,33 @@ class Api_admin_moderation extends Controller
 
     private function resident($userId)
     {
-        return $this->db->raw(
-            "SELECT u.user_id, u.full_name, u.warning_strikes, u.status, u.suspension_reason " .
-            "FROM users u INNER JOIN roles r ON r.role_id = u.role_id " .
-            "WHERE u.user_id = ? AND LOWER(r.role_name) IN ('resident', 'user') LIMIT 1",
-            [$userId]
-        )->fetch(PDO::FETCH_ASSOC);
+        foreach (['resident', 'user'] as $roleName) {
+            $resident = $this->db->table('users')
+                ->select('users.user_id, users.full_name, users.warning_strikes, users.status, users.suspension_reason')
+                ->join('roles', 'roles.role_id = users.role_id')
+                ->where('users.user_id', $userId)
+                ->where('LOWER(roles.role_name)', $roleName)
+                ->limit(1)
+                ->get();
+            if ($resident) {
+                return $resident;
+            }
+        }
+
+        return null;
     }
 
     private function notifyUser($userId, $title, $message)
     {
-        $this->db->raw(
-            'INSERT INTO notifications ' .
-            '(user_id, title, message, notification_type, target_type, is_read, created_at) ' .
-            "VALUES (?, ?, ?, 'moderation', NULL, 0, NOW())",
-            [$userId, $title, $message]
-        );
+        $this->db->table('notifications')->insert([
+            'user_id' => $userId,
+            'title' => $title,
+            'message' => $message,
+            'notification_type' => 'moderation',
+            'target_type' => null,
+            'is_read' => 0,
+            'created_at' => gmdate('Y-m-d H:i:s'),
+        ]);
     }
 
     public function issueWarningStrike($id)
@@ -51,6 +62,11 @@ class Api_admin_moderation extends Controller
         }
 
         $input = get_request_input();
+        if (is_array($input) && array_key_exists('reason', $input) && $input['reason'] !== null) {
+            api_validate_input($input, [
+                'reason' => 'max_length[1000]',
+            ]);
+        }
         $reason = isset($input['reason']) && is_string($input['reason'])
             ? trim($input['reason'])
             : '';
@@ -71,23 +87,36 @@ class Api_admin_moderation extends Controller
                 return;
             }
 
-            $updatedStatement = $this->db->raw(
-                "UPDATE users SET " .
-                "status = IF(warning_strikes + 1 >= 3, 'suspended', status), " .
-                "suspension_reason = IF(warning_strikes + 1 >= 3, ?, suspension_reason), " .
-                'warning_strikes = LEAST(warning_strikes + 1, 3) ' .
-                'WHERE user_id = ? AND warning_strikes < 3',
-                [$reason, (int) $id]
-            );
-            if ($updatedStatement->rowCount() < 1) {
+            $this->db->transaction();
+            try {
+                $updatedCount = $this->db->table('users')
+                    ->where('user_id', (int) $id)
+                    ->where('warning_strikes', '<', 3)
+                    ->increment('warning_strikes');
+                if ($updatedCount < 1) {
+                    $this->db->roll_back();
+                    api_error('This resident already has three warning strikes.', 409);
+                    return;
+                }
+                $updated = $this->resident((int) $id);
+                if ($updated && (int) $updated['warning_strikes'] >= 3) {
+                    $this->db->table('users')
+                        ->where('user_id', (int) $id)
+                        ->update([
+                            'status' => 'suspended',
+                            'suspension_reason' => $reason,
+                        ]);
+                }
+                $this->db->commit();
+            } catch (\Throwable $updateError) {
+                $this->db->roll_back();
+                throw $updateError;
+            }
+            if (!$updated) {
                 api_error('This resident already has three warning strikes.', 409);
                 return;
             }
             $updated = $this->resident((int) $id);
-            if (!$updated) {
-                api_error('Resident account not found.', 404);
-                return;
-            }
             $strikeCount = (int) $updated['warning_strikes'];
             $suspended = $updated['status'] === 'suspended';
             $message = 'You received warning strike ' . $strikeCount . ' of 3. Reason: ' . $reason;
@@ -125,6 +154,11 @@ class Api_admin_moderation extends Controller
         }
 
         $input = get_request_input();
+        if (is_array($input) && array_key_exists('reason', $input) && $input['reason'] !== null) {
+            api_validate_input($input, [
+                'reason' => 'max_length[1000]',
+            ]);
+        }
         $suspended = $input['suspended'] ?? null;
         if (!in_array($suspended, [true, false, 1, 0, '1', '0'], true)) {
             api_error('Choose whether to suspend or reactivate this account.', 422);
@@ -146,10 +180,12 @@ class Api_admin_moderation extends Controller
                 api_error('Resident account not found.', 404);
                 return;
             }
-            $this->db->raw(
-                'UPDATE users SET status = ?, suspension_reason = ? WHERE user_id = ?',
-                [$suspended ? 'suspended' : 'active', $suspended ? $reason : null, (int) $id]
-            );
+            $this->db->table('users')
+                ->where('user_id', (int) $id)
+                ->update([
+                    'status' => $suspended ? 'suspended' : 'active',
+                    'suspension_reason' => $suspended ? $reason : null,
+                ]);
             $notificationWarning = '';
             try {
                 $this->notifyUser(
@@ -203,11 +239,14 @@ class Api_admin_moderation extends Controller
 
             $this->db->transaction();
             try {
-                $this->db->raw(
-                    "UPDATE hazard_reports SET status = 'resolved', resolved_at = COALESCE(resolved_at, NOW()), updated_at = NOW() " .
-                    'WHERE report_id = ?',
-                    [(int) $id]
-                );
+                $resolvedAt = gmdate('Y-m-d H:i:s');
+                $this->db->table('hazard_reports')
+                    ->where('report_id', (int) $id)
+                    ->update([
+                        'status' => 'resolved',
+                        'resolved_at' => $report['resolved_at'] ?? $resolvedAt,
+                        'updated_at' => $resolvedAt,
+                    ]);
                 $this->Admin_model->record_hazard_status_transition(
                     (int) $id,
                     (string) $report['status'],
@@ -223,16 +262,16 @@ class Api_admin_moderation extends Controller
             $notificationWarning = '';
             if (!empty($report['user_id'])) {
                 try {
-                    $this->db->raw(
-                        'INSERT INTO notifications ' .
-                        '(user_id, report_id, target_type, title, message, notification_type, is_read, created_at) ' .
-                        "VALUES (?, ?, 'report', 'Hazard report resolved', ?, 'report_status', 0, NOW())",
-                        [
-                            (int) $report['user_id'],
-                            (int) $id,
-                            'Your report ' . ($report['reference_number'] ?: '#' . $id) . ' has been marked as resolved.'
-                        ]
-                    );
+                    $this->db->table('notifications')->insert([
+                        'user_id' => (int) $report['user_id'],
+                        'report_id' => (int) $id,
+                        'target_type' => 'report',
+                        'title' => 'Hazard report resolved',
+                        'message' => 'Your report ' . ($report['reference_number'] ?: '#' . $id) . ' has been marked as resolved.',
+                        'notification_type' => 'report_status',
+                        'is_read' => 0,
+                        'created_at' => gmdate('Y-m-d H:i:s'),
+                    ]);
                 } catch (\Throwable $notificationError) {
                     error_log('Resolution notification failed for report ' . (int) $id . ': ' . $notificationError->getMessage());
                     $notificationWarning = ' The report was resolved, but its notification could not be delivered.';

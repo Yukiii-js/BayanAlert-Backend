@@ -58,9 +58,6 @@ class DuplicateReportChecks_model extends Model
 
     public function get_columns()
     {
-        $columns = $this->db->raw('SHOW COLUMNS FROM `' . $this->table . '`')->fetchAll(PDO::FETCH_ASSOC);
-        return array_map(static function ($column) {
-            return $column['Field'];
-        }, $columns);
+        return get_table_column_names($this->db, $this->table);
     }
 }

@@ -5,374 +5,317 @@ class Hazard_model extends Model
 {
     public function get_reports_by_date_range($start_date, $end_date, $filters = [])
     {
-        $dayAfterEnd = $this->day_after($end_date);
-        $filter = $this->report_filter_sql($filters);
-        $detail = $this->report_detail_fields();
-
-        $query = $this->db->raw(
-            "SELECT
-                reports.report_id,
-                COALESCE(
-                    NULLIF(categories.category_name, ''),
-                    NULLIF(reports.title, ''),
-                    'Uncategorized'
-                ) AS hazard_type,
-                COALESCE(NULLIF(reports.address_details, ''), 'Not provided') AS location,
-                {$filter['severity_select']},
-                {$detail['select']},
-                reports.status,
-                COALESCE(barangays.barangay_name, 'Former Resident') AS barangay_name,
-                reports.submitted_at AS date_reported
-            FROM hazard_reports AS reports
-            LEFT JOIN hazard_categories AS categories
-                ON categories.category_id = reports.category_id
-            LEFT JOIN users ON users.user_id = reports.user_id
-            LEFT JOIN barangays ON barangays.barangay_id = users.barangay_id
-            {$detail['joins']}
-            WHERE reports.submitted_at >= ?
-                AND reports.submitted_at < ?
-                {$filter['where']}
-            ORDER BY reports.submitted_at DESC, reports.report_id DESC",
-            array_merge([
-                $start_date . ' 00:00:00',
-                $dayAfterEnd . ' 00:00:00'
-            ], $filter['parameters'])
-        );
-
-        return $query->fetchAll(PDO::FETCH_ASSOC);
+        return $this->format_reports($this->query_reports($start_date, $end_date, $filters));
     }
 
     public function get_barangay_report($start_date, $end_date, $barangay_id = null, $filters = [])
     {
-        $dayAfterEnd = $this->day_after($end_date);
         if ($barangay_id !== null) {
             $filters['barangay_id'] = $barangay_id;
         }
-        $filter = $this->report_filter_sql($filters);
-        $parameters = [
-            $start_date . ' 00:00:00',
-            $dayAfterEnd . ' 00:00:00',
+
+        $reports = $this->query_reports($start_date, $end_date, $filters);
+        $history = $this->format_reports($reports);
+        $barangays = $this->db->table('barangays')
+            ->select('barangay_id, barangay_name')
+            ->order_by('barangay_name', 'ASC')
+            ->get_all();
+        $summary = [];
+        foreach ($barangays ?: [] as $barangay) {
+            $summary[(int) $barangay['barangay_id']] = [
+                'barangay_id' => (int) $barangay['barangay_id'],
+                'barangay_name' => $barangay['barangay_name'],
+                'registered_residents' => 0,
+                'total_hazards' => 0,
+                'pending_hazards' => 0,
+                'verified_hazards' => 0,
+                'assigned_hazards' => 0,
+                'in_progress_hazards' => 0,
+                'resolved_hazards' => 0,
+                'rejected_hazards' => 0,
+            ];
+        }
+
+        if (isset($filters['barangay_id']) && $filters['barangay_id'] !== '') {
+            $selectedId = (int) $filters['barangay_id'];
+            $summary = isset($summary[$selectedId]) ? [$selectedId => $summary[$selectedId]] : [];
+        }
+
+        $residentRows = $this->db->table('users')
+            ->select('users.barangay_id, roles.role_name, users.account_status')
+            ->join('roles', 'roles.role_id = users.role_id')
+            ->where('users.account_status', 'active')
+            ->in('roles.role_name', ['resident', 'user'])
+            ->get_all();
+        foreach ($residentRows ?: [] as $resident) {
+            $id = (int) ($resident['barangay_id'] ?? 0);
+            if (isset($summary[$id])) {
+                $summary[$id]['registered_residents']++;
+            }
+        }
+
+        $statusFields = [
+            'pending' => 'pending_hazards',
+            'verified' => 'verified_hazards',
+            'assigned' => 'assigned_hazards',
+            'in_progress' => 'in_progress_hazards',
+            'resolved' => 'resolved_hazards',
+            'rejected' => 'rejected_hazards',
         ];
-
-        $summary = $this->db->raw(
-            "SELECT
-                barangays.barangay_id,
-                barangays.barangay_name,
-                COUNT(DISTINCT CASE
-                    WHEN roles.role_name IN ('resident', 'user')
-                        AND users.account_status = 'active'
-                    THEN users.user_id
-                END) AS registered_residents,
-                COUNT(DISTINCT reports.report_id) AS total_hazards,
-                COUNT(DISTINCT CASE WHEN reports.status = 'pending' THEN reports.report_id END) AS pending_hazards,
-                COUNT(DISTINCT CASE WHEN reports.status = 'verified' THEN reports.report_id END) AS verified_hazards,
-                COUNT(DISTINCT CASE WHEN reports.status = 'assigned' THEN reports.report_id END) AS assigned_hazards,
-                COUNT(DISTINCT CASE WHEN reports.status = 'in_progress' THEN reports.report_id END) AS in_progress_hazards,
-                COUNT(DISTINCT CASE WHEN reports.status = 'resolved' THEN reports.report_id END) AS resolved_hazards,
-                COUNT(DISTINCT CASE WHEN reports.status = 'rejected' THEN reports.report_id END) AS rejected_hazards
-            FROM barangays
-            LEFT JOIN users ON users.barangay_id = barangays.barangay_id
-            LEFT JOIN roles ON roles.role_id = users.role_id
-            LEFT JOIN hazard_reports AS reports
-                ON reports.user_id = users.user_id
-                AND reports.submitted_at >= ?
-                AND reports.submitted_at < ?
-                {$filter['join_where']}
-            WHERE 1 = 1{$filter['summary_where']}
-            GROUP BY barangays.barangay_id, barangays.barangay_name
-            ORDER BY barangays.barangay_name",
-            array_merge($parameters, $filter['join_parameters'], $filter['summary_parameters'])
-        )->fetchAll(PDO::FETCH_ASSOC);
-
-        $historyParameters = [
-            $start_date . ' 00:00:00',
-            $dayAfterEnd . ' 00:00:00'
-        ];
-        $detail = $this->report_detail_fields();
-
-        $history = $this->db->raw(
-            "SELECT
-                barangays.barangay_name,
-                reports.report_id,
-                COALESCE(
-                    NULLIF(categories.category_name, ''),
-                    NULLIF(reports.title, ''),
-                    'Uncategorized'
-                ) AS hazard_type,
-                COALESCE(NULLIF(reports.address_details, ''), 'Not provided') AS location,
-                {$filter['severity_select']},
-                {$detail['select']},
-                reports.status,
-                reports.submitted_at AS date_reported
-            FROM hazard_reports AS reports
-            LEFT JOIN users ON users.user_id = reports.user_id
-            LEFT JOIN barangays ON barangays.barangay_id = users.barangay_id
-            LEFT JOIN hazard_categories AS categories
-                ON categories.category_id = reports.category_id
-            {$detail['joins']}
-            WHERE reports.submitted_at >= ?
-                AND reports.submitted_at < ?
-                {$filter['where']}
-            ORDER BY barangays.barangay_name, reports.submitted_at DESC, reports.report_id DESC",
-            array_merge($historyParameters, $filter['parameters'])
-        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($reports as $report) {
+            $id = (int) ($report['reporter_barangay_id'] ?? 0);
+            if (!isset($summary[$id])) {
+                continue;
+            }
+            $summary[$id]['total_hazards']++;
+            $status = strtolower(trim((string) ($report['status'] ?? '')));
+            if (isset($statusFields[$status])) {
+                $summary[$id][$statusFields[$status]]++;
+            }
+        }
 
         return [
-            'barangays' => $summary,
-            'history' => $history
+            'barangays' => array_values($summary),
+            'history' => $history,
         ];
     }
 
     public function get_report_filter_options()
     {
-        $reportColumns = array_column(
-            $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')->fetchAll(PDO::FETCH_ASSOC),
-            'Field'
-        );
-        $severityColumn = in_array('severity_level', $reportColumns, true)
-            ? 'severity_level'
-            : (in_array('severity', $reportColumns, true) ? 'severity' : null);
+        $reportColumns = get_table_column_names($this->db, 'hazard_reports');
+        $severityColumn = $this->severity_column($reportColumns);
         $severityValues = [];
 
         if ($severityColumn !== null) {
-            $severityValues = $this->db->raw(
-                'SELECT DISTINCT `' . $severityColumn . '` AS severity FROM hazard_reports ' .
-                'WHERE `' . $severityColumn . '` IS NOT NULL AND `' . $severityColumn . '` <> \'\' ' .
-                'ORDER BY severity'
-            )->fetchAll(PDO::FETCH_COLUMN);
+            $severityRows = $this->db->table('hazard_reports')
+                ->select($severityColumn)
+                ->where_not_null($severityColumn)
+                ->where($severityColumn, '!=', '')
+                ->group_by($severityColumn)
+                ->order_by($severityColumn, 'ASC')
+                ->get_all();
+            $severityValues = array_values(array_map(static function ($row) use ($severityColumn) {
+                return $row[$severityColumn];
+            }, $severityRows ?: []));
         }
 
+        $statusRows = $this->db->table('hazard_reports')
+            ->select('status')
+            ->where_not_null('status')
+            ->where('status', '!=', '')
+            ->group_by('status')
+            ->order_by('status', 'ASC')
+            ->get_all();
+
         return [
-            'statuses' => $this->db->raw(
-                'SELECT DISTINCT status FROM hazard_reports WHERE status IS NOT NULL AND status <> \'\' ORDER BY status'
-            )->fetchAll(PDO::FETCH_COLUMN),
+            'statuses' => array_column($statusRows ?: [], 'status'),
             'severities' => $severityValues,
-            'categories' => $this->db->raw(
-                'SELECT category_id, category_name FROM hazard_categories ORDER BY category_name'
-            )->fetchAll(PDO::FETCH_ASSOC),
-            'barangays' => $this->db->raw(
-                'SELECT barangay_id, barangay_name FROM barangays ORDER BY barangay_name'
-            )->fetchAll(PDO::FETCH_ASSOC),
+            'categories' => $this->db->table('hazard_categories')
+                ->select('category_id, category_name')
+                ->order_by('category_name', 'ASC')
+                ->get_all(),
+            'barangays' => $this->db->table('barangays')
+                ->select('barangay_id, barangay_name')
+                ->order_by('barangay_name', 'ASC')
+                ->get_all(),
         ];
     }
 
-    private function report_filter_sql($filters)
+    private function query_reports($startDate, $endDate, array $filters)
     {
-        $reportColumns = array_column(
-            $this->db->raw('SHOW COLUMNS FROM `hazard_reports`')->fetchAll(PDO::FETCH_ASSOC),
-            'Field'
-        );
-        $severityColumn = in_array('severity_level', $reportColumns, true)
-            ? 'severity_level'
-            : (in_array('severity', $reportColumns, true) ? 'severity' : null);
-        $severitySelect = $severityColumn === null
-            ? "'Not specified' AS severity"
-            : 'reports.`' . $severityColumn . '` AS severity';
-        $conditionDetails = [];
-        $parameters = [];
+        $end = $this->day_after($endDate);
+        $reportColumns = get_table_column_names($this->db, 'hazard_reports');
+        $userColumns = get_table_column_names($this->db, 'users');
+        $columns = array_map(static function ($column) {
+            return 'hazard_reports.' . $column;
+        }, $reportColumns);
+        $columns = array_merge($columns, [
+            'hazard_categories.category_name',
+            'users.full_name AS reporter_name',
+            'users.barangay_id AS reporter_barangay_id',
+            'users.account_status AS reporter_account_status',
+            'roles.role_name AS reporter_role',
+            'barangays.barangay_name',
+        ]);
+        foreach (['email', 'phone_number', 'mobile_number', 'contact_number', 'phone_no', 'mobile_phone', 'telephone', 'phone', 'mobile', 'contact'] as $candidate) {
+            if (in_array($candidate, $userColumns, true)) {
+                $columns[] = 'users.' . $candidate . ' AS user_contact_' . $candidate;
+            }
+        }
+
+        $query = $this->db->table('hazard_reports')
+            ->select(implode(', ', $columns))
+            ->left_join('hazard_categories', 'hazard_categories.category_id = hazard_reports.category_id')
+            ->left_join('users', 'users.user_id = hazard_reports.user_id')
+            ->left_join('roles', 'roles.role_id = users.role_id')
+            ->left_join('barangays', 'barangays.barangay_id = users.barangay_id')
+            ->where('hazard_reports.submitted_at', '>=', $startDate . ' 00:00:00')
+            ->where('hazard_reports.submitted_at', '<', $end . ' 00:00:00');
 
         $statuses = $filters['statuses'] ?? ($filters['status'] ?? []);
         $statuses = is_array($statuses) ? $statuses : [$statuses];
         $statuses = array_values(array_filter($statuses, static function ($value) {
             return $value !== '';
         }));
-        if (!empty($statuses)) {
-            $conditionDetails[] = [
-                'sql' => 'reports.status IN (' . implode(',', array_fill(0, count($statuses), '?')) . ')',
-                'parameters' => $statuses,
-            ];
+        if ($statuses) {
+            $query->in('hazard_reports.status', $statuses);
         }
-
         if (isset($filters['category_id']) && $filters['category_id'] !== '') {
-            $conditionDetails[] = [
-                'sql' => 'reports.category_id = ?',
-                'parameters' => [$filters['category_id']],
-            ];
+            $query->where('hazard_reports.category_id', $filters['category_id']);
         }
-
         $severities = $filters['severities'] ?? ($filters['severity'] ?? []);
         $severities = is_array($severities) ? $severities : [$severities];
         $severities = array_values(array_filter($severities, static function ($value) {
             return $value !== '';
         }));
-        if (!empty($severities) && $severityColumn !== null) {
-            $conditionDetails[] = [
-                'sql' => 'reports.`' . $severityColumn . '` IN (' . implode(',', array_fill(0, count($severities), '?')) . ')',
-                'parameters' => $severities,
-            ];
-        } elseif (!empty($severities)) {
-            $conditionDetails[] = [
-                'sql' => 'reports.report_id = ?',
-                'parameters' => [-1],
-            ];
-        }
-
-        if (isset($filters['barangay_id']) && $filters['barangay_id'] !== '') {
-            $conditionDetails[] = [
-                'sql' => 'users.barangay_id = ?',
-                'parameters' => [$filters['barangay_id']],
-            ];
-        }
-
-        $conditions = [];
-        $joinConditions = [];
-        $joinParameters = [];
-        foreach ($conditionDetails as $detail) {
-            $conditions[] = $detail['sql'];
-            $parameters = array_merge($parameters, $detail['parameters']);
-            if (strpos($detail['sql'], 'reports.') !== false) {
-                $joinConditions[] = $detail['sql'];
-                $joinParameters = array_merge($joinParameters, $detail['parameters']);
+        $severityColumn = $this->severity_column($reportColumns);
+        if ($severities) {
+            if ($severityColumn === null) {
+                return [];
             }
+            $query->in('hazard_reports.' . $severityColumn, $severities);
+        }
+        if (isset($filters['barangay_id']) && $filters['barangay_id'] !== '') {
+            $query->where('users.barangay_id', $filters['barangay_id']);
         }
 
-        $where = empty($conditions) ? '' : ' AND ' . implode(' AND ', $conditions);
-        $joinWhere = empty($joinConditions) ? '' : ' AND ' . implode(' AND ', $joinConditions);
-        $summaryWhere = isset($filters['barangay_id']) && $filters['barangay_id'] !== ''
-            ? ' AND barangays.barangay_id = ?'
-            : '';
-
-        return [
-            'where' => $where,
-            'join_where' => $joinWhere,
-            'parameters' => $parameters,
-            'join_parameters' => $joinParameters,
-            'summary_where' => $summaryWhere,
-            'summary_parameters' => $summaryWhere === '' ? [] : [$filters['barangay_id']],
-            'severity_select' => $severitySelect,
-        ];
+        return $query
+            ->order_by('hazard_reports.submitted_at', 'DESC')
+            ->order_by('hazard_reports.report_id', 'DESC')
+            ->get_all() ?: [];
     }
 
-    private function report_detail_fields()
+    private function format_reports(array $reports)
     {
-        $userColumns = $this->table_columns('users');
-        $reportColumns = $this->table_columns('hazard_reports');
-        $resolutionColumns = $this->table_columns('resolutions');
-        $verificationColumns = $this->table_columns('report_verifications');
-        $select = [
-            in_array('full_name', $userColumns, true)
-            ? "COALESCE(NULLIF(users.full_name, ''), 'Deleted User') AS reporter_name"
-            : "'Deleted User' AS reporter_name",
-        ];
-
-        $contactParts = [];
-        foreach (['email', 'phone_number', 'mobile_number', 'contact_number', 'phone_no', 'mobile_phone', 'telephone', 'phone', 'mobile', 'contact'] as $candidate) {
-            if (in_array($candidate, $userColumns, true)) {
-                $contactParts[] = 'NULLIF(users.`' . $candidate . '`, \'\')';
-            }
+        if (!$reports) {
+            return [];
         }
-        foreach (['reporter_contact', 'reporter_phone', 'contact_number', 'phone_number'] as $candidate) {
-            if (in_array($candidate, $reportColumns, true)) {
-                $contactParts[] = 'NULLIF(reports.`' . $candidate . '`, \'\')';
-            }
-        }
-        $select[] = empty($contactParts)
-            ? 'NULL AS reporter_contact'
-            : 'NULLIF(CONCAT_WS(\' | \', ' . implode(', ', $contactParts) . '), \'\') AS reporter_contact';
-
-        $coordinatesAvailable = in_array('latitude', $reportColumns, true)
-            && in_array('longitude', $reportColumns, true);
-        $select[] = $coordinatesAvailable
-            ? 'CONCAT(CAST(reports.latitude AS CHAR), \', \', CAST(reports.longitude AS CHAR)) AS coordinates'
-            : 'NULL AS coordinates';
-
-        $joins = [];
-        $resolutionJoin = '';
-        $resolutionTimeColumn = $this->first_column(
-            $resolutionColumns,
-            ['resolved_at', 'resolution_at', 'resolution_date', 'confirmed_at', 'created_at', 'updated_at']
+        $reportIds = array_values(array_unique(array_map(static function ($report) {
+            return (int) $report['report_id'];
+        }, $reports)));
+        $resolutionRows = $this->latest_related_rows(
+            'resolutions',
+            $reportIds,
+            ['resolved_at', 'resolution_at', 'resolution_date', 'confirmed_at', 'created_at', 'updated_at'],
+            ['resolution_notes', 'resolution_note', 'resolution_details', 'resolution_description', 'details', 'description', 'notes', 'remarks', 'comment']
         );
-        if (in_array('report_id', $resolutionColumns, true)) {
-            if (in_array('resolution_id', $resolutionColumns, true)) {
-                $resolutionJoin = 'LEFT JOIN resolutions AS resolution_info ' .
-                    'ON resolution_info.report_id = reports.report_id ' .
-                    'AND resolution_info.resolution_id = (' .
-                    'SELECT MAX(latest_resolution.resolution_id) FROM resolutions AS latest_resolution ' .
-                    'WHERE latest_resolution.report_id = reports.report_id)';
-            } elseif ($resolutionTimeColumn !== null) {
-                $resolutionJoin = 'LEFT JOIN resolutions AS resolution_info ' .
-                    'ON resolution_info.report_id = reports.report_id ' .
-                    'AND resolution_info.`' . $resolutionTimeColumn . '` = (' .
-                    'SELECT MAX(latest_resolution.`' . $resolutionTimeColumn . '`) FROM resolutions AS latest_resolution ' .
-                    'WHERE latest_resolution.report_id = reports.report_id)';
-            }
-        }
-        if ($resolutionJoin !== '') {
-            $joins[] = $resolutionJoin;
-        }
-
-        $resolutionNoteColumn = $this->first_column(
-            $reportColumns,
-            ['resolution_notes', 'resolution_note', 'resolution_details', 'resolution_description', 'resolution']
-        );
-        if ($resolutionNoteColumn !== null) {
-            $select[] = 'reports.`' . $resolutionNoteColumn . '` AS resolution_notes';
-        } else {
-            $resolutionNoteColumn = $this->first_column(
-                $resolutionColumns,
-                ['resolution_notes', 'resolution_note', 'resolution_details', 'resolution_description', 'details', 'description', 'notes', 'remarks', 'comment']
-            );
-            $select[] = $resolutionNoteColumn !== null && $resolutionJoin !== ''
-                ? 'resolution_info.`' . $resolutionNoteColumn . '` AS resolution_notes'
-                : 'NULL AS resolution_notes';
-        }
-
-        $timestampExpressions = [];
-        if (in_array('resolved_at', $reportColumns, true)) {
-            $timestampExpressions[] = 'reports.resolved_at';
-        }
-        if ($resolutionTimeColumn !== null && $resolutionJoin !== '') {
-            $timestampExpressions[] = 'resolution_info.`' . $resolutionTimeColumn . '`';
-        }
-        $select[] = empty($timestampExpressions)
-            ? 'NULL AS resolution_timestamp'
-            : 'COALESCE(' . implode(', ', $timestampExpressions) . ') AS resolution_timestamp';
-
-        $adminRemarksColumn = $this->first_column(
-            $verificationColumns,
+        $verificationRows = $this->latest_related_rows(
+            'report_verifications',
+            $reportIds,
+            ['verification_id'],
             ['admin_remarks', 'verification_remarks', 'remarks', 'remark', 'notes']
         );
-        if ($adminRemarksColumn !== null && in_array('report_id', $verificationColumns, true)
-            && in_array('verification_id', $verificationColumns, true)) {
-            $joins[] = 'LEFT JOIN report_verifications AS verification_info ' .
-                'ON verification_info.report_id = reports.report_id ' .
-                'AND verification_info.verification_id = (' .
-                'SELECT MAX(latest_verification.verification_id) FROM report_verifications AS latest_verification ' .
-                'WHERE latest_verification.report_id = reports.report_id)';
-            $select[] = 'verification_info.`' . $adminRemarksColumn . '` AS admin_remarks';
-        } else {
-            $adminRemarksColumn = $this->first_column(
-                $reportColumns,
-                ['admin_remarks', 'verification_remarks', 'remarks', 'remark']
-            );
-            $select[] = $adminRemarksColumn !== null
-                ? 'reports.`' . $adminRemarksColumn . '` AS admin_remarks'
-                : 'NULL AS admin_remarks';
+        $reportColumns = get_table_column_names($this->db, 'hazard_reports');
+        $contactColumns = array_values(array_filter(
+            ['reporter_contact', 'reporter_phone', 'contact_number', 'phone_number'],
+            static function ($column) use ($reportColumns) {
+                return in_array($column, $reportColumns, true);
+            }
+        ));
+
+        $formatted = [];
+        foreach ($reports as $report) {
+            $id = (int) $report['report_id'];
+            $contactValues = [];
+            foreach ($contactColumns as $column) {
+                if (!empty($report[$column])) {
+                    $contactValues[] = trim((string) $report[$column]);
+                }
+            }
+            foreach (['email', 'phone_number', 'mobile_number', 'contact_number', 'phone_no', 'mobile_phone', 'telephone', 'phone', 'mobile', 'contact'] as $candidate) {
+                $key = 'user_contact_' . $candidate;
+                if (!empty($report[$key])) {
+                    $contactValues[] = trim((string) $report[$key]);
+                }
+            }
+
+            $resolution = $resolutionRows[$id] ?? [];
+            $verification = $verificationRows[$id] ?? [];
+            $resolutionNotes = null;
+            foreach (['resolution_notes', 'resolution_note', 'resolution_details', 'resolution_description', 'details', 'description', 'notes', 'remarks', 'comment'] as $candidate) {
+                if (!empty($report[$candidate])) {
+                    $resolutionNotes = $report[$candidate];
+                    break;
+                }
+                if (!empty($resolution[$candidate])) {
+                    $resolutionNotes = $resolution[$candidate];
+                    break;
+                }
+            }
+
+            $coordinates = null;
+            if (isset($report['latitude'], $report['longitude'])
+                && $report['latitude'] !== null && $report['longitude'] !== null) {
+                $coordinates = (string) $report['latitude'] . ', ' . (string) $report['longitude'];
+            }
+
+            $formatted[] = [
+                'report_id' => $id,
+                'hazard_type' => trim((string) ($report['category_name'] ?? ''))
+                    ?: (trim((string) ($report['title'] ?? '')) ?: 'Uncategorized'),
+                'location' => trim((string) ($report['address_details'] ?? '')) ?: 'Not provided',
+                'severity' => trim((string) ($report['severity_level'] ?? $report['severity'] ?? '')) ?: 'Not specified',
+                'reporter_name' => trim((string) ($report['reporter_name'] ?? '')) ?: 'Deleted User',
+                'reporter_contact' => $contactValues ? implode(' | ', array_values(array_unique($contactValues))) : null,
+                'coordinates' => $coordinates,
+                'resolution_notes' => $resolutionNotes,
+                'resolution_timestamp' => $report['resolved_at'] ?? ($resolution['resolved_at'] ?? $resolution['resolution_at'] ?? $resolution['resolution_date'] ?? $resolution['confirmed_at'] ?? $resolution['created_at'] ?? $resolution['updated_at'] ?? null),
+                'admin_remarks' => $report['admin_remarks'] ?? ($verification['admin_remarks'] ?? $verification['verification_remarks'] ?? $verification['remarks'] ?? $verification['remark'] ?? $verification['notes'] ?? null),
+                'status' => $report['status'] ?? null,
+                'barangay_name' => $report['barangay_name'] ?? 'Former Resident',
+                'date_reported' => $report['submitted_at'] ?? null,
+            ];
         }
 
-        return [
-            'select' => implode(",\n                ", $select),
-            'joins' => implode("\n            ", $joins),
-        ];
+        return $formatted;
     }
 
-    private function table_columns($table)
+    private function latest_related_rows($table, array $reportIds, array $orderCandidates, array $valueCandidates)
     {
-        if (!in_array($table, ['users', 'hazard_reports', 'resolutions', 'report_verifications'], true)) {
+        if (!database_table_exists($this->db, $table)) {
             return [];
         }
-        $tableExists = $this->db->raw("SHOW TABLES LIKE '" . $table . "'")->fetch(PDO::FETCH_NUM);
-        if (!$tableExists) {
+        $available = get_table_column_names($this->db, $table);
+        if (!in_array('report_id', $available, true)) {
             return [];
         }
-
-        return array_column(
-            $this->db->raw('SHOW COLUMNS FROM `' . $table . '`')->fetchAll(PDO::FETCH_ASSOC),
-            'Field'
-        );
+        $orderColumn = $this->first_column($available, $orderCandidates);
+        $valueColumns = array_values(array_filter($valueCandidates, static function ($column) use ($available) {
+            return in_array($column, $available, true);
+        }));
+        if ($orderColumn === null && !$valueColumns) {
+            return [];
+        }
+        $columns = array_merge(['report_id'], $valueColumns);
+        if ($orderColumn !== null) {
+            $columns[] = $orderColumn;
+        }
+        $query = $this->db->table($table)
+            ->select(implode(', ', array_unique($columns)))
+            ->in('report_id', $reportIds);
+        if ($orderColumn !== null) {
+            $query->order_by($orderColumn, 'DESC');
+        }
+        $rows = $query->get_all();
+        $latest = [];
+        foreach ($rows ?: [] as $row) {
+            $id = (int) $row['report_id'];
+            if (!isset($latest[$id])) {
+                $latest[$id] = $row;
+            }
+        }
+        return $latest;
     }
 
-    private function first_column($available, $candidates)
+    private function severity_column(array $reportColumns)
+    {
+        if (in_array('severity_level', $reportColumns, true)) {
+            return 'severity_level';
+        }
+        return in_array('severity', $reportColumns, true) ? 'severity' : null;
+    }
+
+    private function first_column(array $available, array $candidates)
     {
         foreach ($candidates as $candidate) {
             if (in_array($candidate, $available, true)) {

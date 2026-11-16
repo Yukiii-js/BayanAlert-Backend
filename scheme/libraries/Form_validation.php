@@ -52,6 +52,8 @@ class Form_validation {
      */
     private static $err_required = '"%s" is required.';
 
+    private static $err_string = '"%s" must be a string.';
+
     /**
      * Error message for matches rule
      *
@@ -243,10 +245,21 @@ class Form_validation {
     public function __construct()
     {
         $this->LAVA = lava_instance();
-        foreach($_POST as $key => $value)
-        {
-            $this->post_arrays[$key] = $value;
-        }
+        $post = $this->LAVA->request->post();
+        $this->post_arrays = is_array($post) ? $post : array();
+    }
+
+    /**
+     * Set validation input explicitly, including decoded JSON request bodies.
+     *
+     * @param array $data
+     * @return $this
+     */
+    public function set_data(array $data)
+    {
+        $this->post_arrays = $data;
+        $this->errors = array();
+        return $this;
     }
 
     /**
@@ -256,7 +269,7 @@ class Form_validation {
      */
     public function submitted()
     {
-        return !empty($_POST) ? TRUE : FALSE;
+        return !empty($this->post_arrays) ? TRUE : FALSE;
     }
 
     /**
@@ -313,6 +326,8 @@ class Form_validation {
             {
                 $this->set_error_message($custom_error, self::$err_pattern, $this->name);
             }
+        } elseif (!is_string($this->value)) {
+            $this->set_error_message($custom_error, self::$err_string, $this->name);
         } else {
             $regex = '/^(' . $this->patterns[$name] . ')$/u';
             if ($this->value != '' && ! preg_match($regex, $this->value))
@@ -420,6 +435,10 @@ class Form_validation {
     public function exact_length($length, $custom_error = '')
     {
         if (! is_numeric($length)) return FALSE;
+        if (!is_string($this->value)) {
+            $this->set_error_message($custom_error, self::$err_string, $this->name);
+            return $this;
+        }
 
         if (strlen($this->value) !== (int) $length)  // also fixed: was === (wrong logic)
         {
@@ -438,6 +457,10 @@ class Form_validation {
     public function min_length($length, $custom_error = '')
     {
         if (! is_numeric($length)) return FALSE;
+        if (!is_string($this->value)) {
+            $this->set_error_message($custom_error, self::$err_string, $this->name);
+            return $this;
+        }
 
         if (strlen($this->value) < (int) $length)
         {
@@ -456,6 +479,10 @@ class Form_validation {
     public function max_length($length, $custom_error = '')
     {
         if (! is_numeric($length)) return FALSE;
+        if (!is_string($this->value)) {
+            $this->set_error_message($custom_error, self::$err_string, $this->name);
+            return $this;
+        }
 
         if (strlen($this->value) > (int) $length)
         {
@@ -472,7 +499,7 @@ class Form_validation {
      */
     public function valid_email($custom_error = '')
     {
-        if(!filter_var($this->value, FILTER_VALIDATE_EMAIL))
+        if(!is_string($this->value) || !filter_var($this->value, FILTER_VALIDATE_EMAIL))
         {
             $this->set_error_message($custom_error, self::$err_email, $this->name);
         }
@@ -577,9 +604,10 @@ class Form_validation {
     */
     public function numeric($custom_error = '')
     {
-        if(($this->value != '' || $this->value != null))
+        if ($this->value !== '' && $this->value !== null)
         {
-            if(! preg_match('/^[\-+]?[0-9]*\.?[0-9]+$/', $this->value))
+            if (!is_scalar($this->value)
+                || !preg_match('/^[\-+]?[0-9]*\.?[0-9]+$/', (string) $this->value))
             {
                 $this->set_error_message($custom_error, self::$err_numeric, $this->name);
             }
@@ -683,6 +711,10 @@ class Form_validation {
      * @return void
      */
     public function valid_name($custom_error = '') {
+        if (!is_string($this->value)) {
+            $this->set_error_message($custom_error, self::$err_string, $this->name);
+            return $this;
+        }
         if (!preg_match('/^[\p{L} ]+$/u', $this->value)) {
             $this->set_error_message($custom_error, self::$err_valid_name, $this->value);
         }
@@ -716,7 +748,7 @@ class Form_validation {
      * @return string
      */
     public function errors() {
-        if($_POST)
+        if($this->post_arrays)
         {
             if(!empty($this->get_errors()))
             {

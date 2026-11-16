@@ -32,28 +32,33 @@ class SystemApiController extends Controller
     {
         $input = get_request_input();
         try {
+            api_validate_input(is_array($input) ? $input : [], [
+                'api_name' => 'required|max_length[120]',
+                'category' => 'required|in_list[Weather,Hazard,Mapping,Notifications]',
+                'endpoint_url' => 'required|max_length[500]',
+                'auth_header_type' => 'required|in_list[bearer,query_param,custom_header,none]',
+                'sync_interval_minutes' => 'required|numeric',
+            ]);
             $data = $this->validateInput(is_array($input) ? $input : [], false);
             $slug = strtolower(trim((string) preg_replace('/[^a-z0-9]+/i', '-', $data['api_name']), '-'));
             $key = substr($slug ?: 'custom-api', 0, 52) . '-' . bin2hex(random_bytes(5));
-            $this->db->raw(
-                'INSERT INTO system_apis (api_key, api_name, category, endpoint_url, credential_encrypted, ' .
-                'auth_header_type, auth_header_name, sync_interval_minutes, custom_parameters_json, is_enabled, ' .
-                'is_custom, last_status, created_at, updated_at) ' .
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(), NOW())',
-                [
-                    $key,
-                    $data['api_name'],
-                    $data['category'],
-                    $data['endpoint_url'],
-                    $data['credential_encrypted'],
-                    $data['auth_header_type'],
-                    $data['auth_header_name'],
-                    $data['sync_interval_minutes'],
-                    $data['custom_parameters_json'],
-                    $data['is_enabled'],
-                    'idle',
-                ]
-            );
+            $now = gmdate('Y-m-d H:i:s');
+            $this->db->table('system_apis')->insert([
+                'api_key' => $key,
+                'api_name' => $data['api_name'],
+                'category' => $data['category'],
+                'endpoint_url' => $data['endpoint_url'],
+                'credential_encrypted' => $data['credential_encrypted'],
+                'auth_header_type' => $data['auth_header_type'],
+                'auth_header_name' => $data['auth_header_name'],
+                'sync_interval_minutes' => $data['sync_interval_minutes'],
+                'custom_parameters_json' => $data['custom_parameters_json'],
+                'is_enabled' => $data['is_enabled'],
+                'is_custom' => 1,
+                'last_status' => 'idle',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
             $record = $this->findByKey($key);
             api_response(['api' => $this->publicRecord($record)], 201, 'System API registered.');
         } catch (InvalidArgumentException $exception) {
@@ -69,24 +74,37 @@ class SystemApiController extends Controller
         $record = $this->findById($id);
         $input = get_request_input();
         try {
+            $validationFields = [
+                'api_name' => 'required|max_length[120]',
+                'category' => 'required|in_list[Weather,Hazard,Mapping,Notifications]',
+                'endpoint_url' => 'required|max_length[500]',
+                'auth_header_type' => 'required|in_list[bearer,query_param,custom_header,none]',
+                'sync_interval_minutes' => 'required|numeric',
+            ];
+            $providedFields = [];
+            foreach ($validationFields as $field => $rules) {
+                if (is_array($input) && array_key_exists($field, $input)) {
+                    $providedFields[$field] = $rules;
+                }
+            }
+            if ($providedFields) {
+                api_validate_input($input, $providedFields);
+            }
             $data = $this->validateInput(is_array($input) ? $input : [], true, $record);
-            $this->db->raw(
-                'UPDATE system_apis SET api_name = ?, category = ?, endpoint_url = ?, credential_encrypted = ?, ' .
-                'auth_header_type = ?, auth_header_name = ?, sync_interval_minutes = ?, custom_parameters_json = ?, ' .
-                'is_enabled = ?, updated_at = NOW() WHERE id = ?',
-                [
-                    $data['api_name'],
-                    $data['category'],
-                    $data['endpoint_url'],
-                    $data['credential_encrypted'],
-                    $data['auth_header_type'],
-                    $data['auth_header_name'],
-                    $data['sync_interval_minutes'],
-                    $data['custom_parameters_json'],
-                    $data['is_enabled'],
-                    (int) $record['id'],
-                ]
-            );
+            $this->db->table('system_apis')
+                ->where('id', (int) $record['id'])
+                ->update([
+                    'api_name' => $data['api_name'],
+                    'category' => $data['category'],
+                    'endpoint_url' => $data['endpoint_url'],
+                    'credential_encrypted' => $data['credential_encrypted'],
+                    'auth_header_type' => $data['auth_header_type'],
+                    'auth_header_name' => $data['auth_header_name'],
+                    'sync_interval_minutes' => $data['sync_interval_minutes'],
+                    'custom_parameters_json' => $data['custom_parameters_json'],
+                    'is_enabled' => $data['is_enabled'],
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ]);
             $this->syncLegacyEnabledState($record['api_key'], $data['is_enabled']);
             api_response(['api' => $this->publicRecord($this->findById((string) $record['id']))], 200, 'System API configuration updated.');
         } catch (InvalidArgumentException $exception) {
@@ -119,18 +137,17 @@ class SystemApiController extends Controller
 
             $response = SystemApiConfig::request($url, $headers);
             $success = $response['error'] === null;
-            $this->db->raw(
-                'UPDATE system_apis SET last_status = ?, last_http_status = ?, last_latency_ms = ?, ' .
-                'last_synced_at = NOW(), last_error_message = ?, rate_limit_until = ?, updated_at = NOW() WHERE id = ?',
-                [
-                    $success ? 'online' : 'error',
-                    $response['status'],
-                    $response['latency_ms'],
-                    $response['error'],
-                    $response['retry_after_at'],
-                    (int) $record['id'],
-                ]
-            );
+            $this->db->table('system_apis')
+                ->where('id', (int) $record['id'])
+                ->update([
+                    'last_status' => $success ? 'online' : 'error',
+                    'last_http_status' => $response['status'],
+                    'last_latency_ms' => $response['latency_ms'],
+                    'last_synced_at' => gmdate('Y-m-d H:i:s'),
+                    'last_error_message' => $response['error'],
+                    'rate_limit_until' => $response['retry_after_at'],
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ]);
 
             if (!$success) {
                 api_error($response['error'] ?: 'Connection test failed.', $response['status'] === 429 ? 429 : 502);
@@ -154,16 +171,27 @@ class SystemApiController extends Controller
     {
         $record = $this->findById($id);
         try {
-            $this->db->raw(
-                "UPDATE system_apis SET last_status = 'idle', last_http_status = NULL, last_latency_ms = NULL, " .
-                'last_error_message = NULL, last_synced_at = NULL, rate_limit_until = NULL, updated_at = NOW() WHERE id = ?',
-                [(int) $record['id']]
-            );
-            $this->db->raw(
-                'UPDATE external_api_configs SET last_status = ?, last_error_message = NULL, rate_limit_until = NULL, ' .
-                'last_synced_at = NULL, records_cached = 0, updated_at = NOW() WHERE api_key = ?',
-                ['idle', $record['api_key']]
-            );
+            $this->db->table('system_apis')
+                ->where('id', (int) $record['id'])
+                ->update([
+                    'last_status' => 'idle',
+                    'last_http_status' => null,
+                    'last_latency_ms' => null,
+                    'last_error_message' => null,
+                    'last_synced_at' => null,
+                    'rate_limit_until' => null,
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ]);
+            $this->db->table('external_api_configs')
+                ->where('api_key', $record['api_key'])
+                ->update([
+                    'last_status' => 'idle',
+                    'last_error_message' => null,
+                    'rate_limit_until' => null,
+                    'last_synced_at' => null,
+                    'records_cached' => 0,
+                    'updated_at' => gmdate('Y-m-d H:i:s'),
+                ]);
             ExternalApiConfig::forget((string) $record['api_key']);
             api_response(['id' => (int) $record['id']], 200, 'Rate-limit status and cached sync state cleared.');
         } catch (Throwable $exception) {
@@ -180,7 +208,10 @@ class SystemApiController extends Controller
         }
 
         try {
-            $this->db->raw('DELETE FROM system_apis WHERE id = ? AND is_custom = 1', [(int) $record['id']]);
+            $this->db->table('system_apis')
+                ->where('id', (int) $record['id'])
+                ->where('is_custom', 1)
+                ->delete();
             api_response(['id' => (int) $record['id']], 200, 'Custom API deleted.');
         } catch (Throwable $exception) {
             error_log('System API delete failed: ' . $exception->getMessage());
@@ -287,8 +318,10 @@ class SystemApiController extends Controller
         if (!ctype_digit($id) || (int) $id < 1) {
             api_error('Invalid system API ID.', 400);
         }
-        $record = $this->db->raw('SELECT * FROM system_apis WHERE id = ? LIMIT 1', [(int) $id])
-            ->fetch(PDO::FETCH_ASSOC);
+        $record = $this->db->table('system_apis')
+            ->where('id', (int) $id)
+            ->limit(1)
+            ->get();
         if (!$record) {
             api_error('System API not found.', 404);
         }
@@ -297,8 +330,10 @@ class SystemApiController extends Controller
 
     private function findByKey(string $key): array
     {
-        $record = $this->db->raw('SELECT * FROM system_apis WHERE api_key = ? LIMIT 1', [$key])
-            ->fetch(PDO::FETCH_ASSOC);
+        $record = $this->db->table('system_apis')
+            ->where('api_key', $key)
+            ->limit(1)
+            ->get();
         if (!$record) {
             throw new RuntimeException('The new API record could not be loaded.');
         }
@@ -318,10 +353,12 @@ class SystemApiController extends Controller
 
     private function syncLegacyEnabledState(string $key, int $enabled): void
     {
-        $this->db->raw(
-            'UPDATE external_api_configs SET is_enabled = ?, updated_at = NOW() WHERE api_key = ?',
-            [$enabled, $key]
-        );
+        $this->db->table('external_api_configs')
+            ->where('api_key', $key)
+            ->update([
+                'is_enabled' => $enabled,
+                'updated_at' => gmdate('Y-m-d H:i:s'),
+            ]);
         ExternalApiConfig::forget($key);
     }
 
