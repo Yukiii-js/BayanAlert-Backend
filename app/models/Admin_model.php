@@ -419,7 +419,8 @@ class Admin_model extends Model
     public function get_rows($table, $search = '', $page = 1, $pageSize = 25)
     {
         $model = $this->get_table_model($table);
-        if ($model && method_exists($model, 'get_all_records')) {
+        if ($table !== 'users' && $table !== 'hazard_reports'
+            && $model && method_exists($model, 'get_all_records')) {
             return $model->get_all_records($search, $page, $pageSize);
         }
 
@@ -456,21 +457,51 @@ class Admin_model extends Model
 
             $rowsQuery->left_join('roles', 'roles.role_id = users.role_id')
                 ->left_join('barangays', 'barangays.barangay_id = users.barangay_id');
+            $countQuery->left_join('roles', 'roles.role_id = users.role_id')
+                ->left_join('barangays', 'barangays.barangay_id = users.barangay_id');
         } else {
             $selectColumns = $columns;
         }
 
         $rowsQuery->select(implode(', ', $selectColumns));
         if ($search !== '' && $searchColumn !== null) {
-            $countQuery->like($searchColumn, '%' . $search . '%');
-            $rowsQuery->like($searchColumn, '%' . $search . '%');
+            if ($table === 'users') {
+                $pattern = '%' . $search . '%';
+                foreach ([$countQuery, $rowsQuery] as $query) {
+                    $query->like('users.full_name', $pattern)
+                        ->or_like('users.username', $pattern)
+                        ->or_like('users.email', $pattern)
+                        ->or_like('barangays.barangay_name', $pattern);
+                }
+            } else {
+                $countQuery->like($searchColumn, '%' . $search . '%');
+                $rowsQuery->like($searchColumn, '%' . $search . '%');
+            }
+        }
+
+        $rows = $rowsQuery->order_by($table . '.' . $info['primary_key'], 'DESC')
+            ->limit($pageSize, $offset)
+            ->get_all();
+        if ($table === 'hazard_reports') {
+            $voteCounts = $this->get_report_vote_counts(
+                array_column($rows ?: [], 'report_id')
+            );
+            foreach ($rows as &$row) {
+                $counts = $voteCounts[(int) $row['report_id']] ?? [
+                    'confirm_count' => 0,
+                    'dispute_count' => 0
+                ];
+                $row['confirm_count'] = $counts['confirm_count'];
+                $row['dispute_count'] = $counts['dispute_count'];
+            }
+            unset($row);
+            $displayColumns[] = 'confirm_count';
+            $displayColumns[] = 'dispute_count';
         }
 
         return [
             'columns' => $displayColumns,
-            'rows' => $rowsQuery->order_by($table . '.' . $info['primary_key'], 'DESC')
-                ->limit($pageSize, $offset)
-                ->get_all(),
+            'rows' => $rows,
             'total' => (int) $countQuery->count(),
             'search_column' => $searchColumn,
             'page' => $page,
@@ -480,18 +511,69 @@ class Admin_model extends Model
 
     public function get_record($table, $id)
     {
-        $model = $this->get_table_model($table);
-        if ($model && method_exists($model, 'find')) {
-            $record = $model->find($id);
-            if ($record !== null) {
-                return $record;
-            }
+        if ($table === 'users') {
+            $columns = array_map(static function ($column) {
+                return 'users.`' . str_replace('`', '``', $column) . '`';
+            }, $this->get_column_names('users'));
+            $columns[] = 'roles.role_name AS role_name';
+            $columns[] = 'barangays.barangay_name AS barangay_name';
+            return $this->db->raw(
+                'SELECT ' . implode(', ', $columns) . ' ' .
+                'FROM users ' .
+                'LEFT JOIN roles ON roles.role_id = users.role_id ' .
+                'LEFT JOIN barangays ON barangays.barangay_id = users.barangay_id ' .
+                'WHERE users.user_id = ? LIMIT 1',
+                [(int) $id]
+            )->fetch(PDO::FETCH_ASSOC);
         }
 
-        $info = $this->get_table_info($table);
-        return $this->db->table($table)
-            ->where($info['primary_key'], $id)
-            ->get();
+        $model = $this->get_table_model($table);
+        $record = null;
+        if ($model && method_exists($model, 'find')) {
+            $record = $model->find($id);
+        }
+
+        if ($record === null) {
+            $info = $this->get_table_info($table);
+            $record = $this->db->table($table)
+                ->where($info['primary_key'], $id)
+                ->get();
+        }
+        if ($table === 'hazard_reports' && $record) {
+            $counts = $this->get_report_vote_counts([(int) $record['report_id']]);
+            $record['confirm_count'] = $counts[(int) $record['report_id']]['confirm_count'] ?? 0;
+            $record['dispute_count'] = $counts[(int) $record['report_id']]['dispute_count'] ?? 0;
+        }
+
+        return $record;
+    }
+
+    private function get_report_vote_counts(array $reportIds)
+    {
+        $reportIds = array_values(array_unique(array_filter(array_map('intval', $reportIds))));
+        if (!$reportIds) {
+            return [];
+        }
+
+        $rows = $this->db->raw(
+            'SELECT report_id, ' .
+            'SUM(CASE WHEN vote = ? THEN 1 ELSE 0 END) AS confirm_count, ' .
+            'SUM(CASE WHEN vote = ? THEN 1 ELSE 0 END) AS dispute_count ' .
+            'FROM report_community_votes WHERE report_id IN (' .
+            implode(',', array_fill(0, count($reportIds), '?')) .
+            ') GROUP BY report_id',
+            array_merge(['confirm', 'dispute'], $reportIds)
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(int) $row['report_id']] = [
+                'confirm_count' => (int) $row['confirm_count'],
+                'dispute_count' => (int) $row['dispute_count']
+            ];
+        }
+
+        return $counts;
     }
 
     public function get_hazard_notification_data($reportId)

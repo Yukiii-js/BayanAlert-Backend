@@ -38,9 +38,17 @@ class Api_map extends Controller
                 $reports = $this->db->raw(
                     'SELECT r.report_id, r.reference_number, r.category_id, r.status, ' . $severityColumn . ', ' .
                     $titleColumn . ', ' . $descriptionColumn . ', ' . $submittedAtColumn . ', ' .
-                    'r.latitude, r.longitude, c.category_name ' .
+                    'r.latitude, r.longitude, c.category_name, ' .
+                    'COALESCE(vote_counts.confirm_count, 0) AS confirm_count, ' .
+                    'COALESCE(vote_counts.dispute_count, 0) AS dispute_count ' .
                     'FROM hazard_reports r ' .
                     'LEFT JOIN hazard_categories c ON c.category_id = r.category_id ' .
+                    'LEFT JOIN (' .
+                    'SELECT report_id, ' .
+                    'SUM(CASE WHEN vote = \'confirm\' THEN 1 ELSE 0 END) AS confirm_count, ' .
+                    'SUM(CASE WHEN vote = \'dispute\' THEN 1 ELSE 0 END) AS dispute_count ' .
+                    'FROM report_community_votes GROUP BY report_id' .
+                    ') vote_counts ON vote_counts.report_id = r.report_id ' .
                     "WHERE LOWER(COALESCE(r.status, '')) <> 'resolved' " .
                     'AND r.latitude BETWEEN 13.25 AND 13.55 ' .
                     'AND r.longitude BETWEEN 121.05 AND 121.32 ' .

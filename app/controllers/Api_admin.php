@@ -66,6 +66,10 @@ class Api_admin extends Controller
         try {
             $result = $this->Admin_model->get_rows($table, $search, $page);
             $schema = $this->Admin_model->get_schema($table);
+            if ($table === 'hazard_reports') {
+                $schema['confirm_count'] = ['label' => 'Resident confirms'];
+                $schema['dispute_count'] = ['label' => 'Resident disputes'];
+            }
             
             api_response([
                 'table'         => $table,
